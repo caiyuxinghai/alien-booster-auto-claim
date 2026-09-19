@@ -74,14 +74,30 @@ def is_honor_dialog(f, a):
     return "systemmanager" in s or "hihonor" in s
 
 
-def ensure_main(cfg):
-    for _ in range(5):
+def ensure_main(cfg, budget=60):
+    """Get back to the host app's main screen.
+
+    Never force-closes an ad that is still on screen (that would forfeit the
+    reward) - it waits it out. Backs out of a foreign app if an ad deeplink
+    launched one that Honor did not intercept.
+    """
+    end = time.time() + budget
+    pressed_back = False
+    while time.time() < end:
         f, a = focus()
         if is_main(f, a, cfg):
             return True
+        if is_ad(f, a):
+            time.sleep(2)                       # let it finish, do not kill it
+            continue
         if is_honor_dialog(f, a):
             tap(*cfg.deny)
             time.sleep(1.2)
+            continue
+        if not pressed_back and f and cfg.package not in f:
+            adb("shell", "input", "keyevent", 4)     # KEYCODE_BACK
+            pressed_back = True
+            time.sleep(1.0)
             continue
         bring_front(cfg.main)
         time.sleep(2.2)
@@ -148,7 +164,7 @@ def do_ad(i, cfg):
     if any(t in xml for t in READY_TEXTS):
         tap(*(find_bounds(xml, "跳过") or cfg.skip))
         time.sleep(1.2)
-        print(f"[{i}] ready -> skip", flush=True)
+        close_ad(i, cfg, "ready -> skip")
         return True
 
     m = COUNTDOWN_RE.search(xml)
