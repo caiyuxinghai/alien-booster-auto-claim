@@ -93,6 +93,48 @@ python scripts/gh_push_via_api.py <owner>/<repo> main README.md SKILL.md
 
 每天刷新。跑完按钮会变成"今日广告已看完，请明日再来"。
 
+## 连不上手机？按这个顺序查
+
+**① `adb devices` 全空 —— 先换 USB 后端（最常见、最容易误判）**
+
+```bash
+ADB_LIBUSB=1 adb kill-server && ADB_LIBUSB=1 adb start-server && ADB_LIBUSB=1 adb devices
+```
+
+新版 platform-tools 在部分 Windows 环境下**默认 USB 后端抢不到荣耀的 ADB 接口**，
+`adb devices` 会一直空，特别容易被误判成"线坏了 / 驱动没装 / 手机没连"。
+实测加上 `ADB_LIBUSB=1` 后设备立刻出现。用 `adb server-status` 可确认后端是否为
+`usb_backend: LIBUSB`。**建议本项目所有 adb 调用都带上这个变量。**
+
+**② 刚 `start-server` 就查会误报空**
+
+服务刚起时 USB 枚举尚未完成，`adb devices` 可能返回空表。等 2~3 秒或轮询几次再判断。
+
+**③ 状态显示 `unauthorized`**
+
+手机上会弹"是否允许 USB 调试"→ 勾 **一律允许** → 允许。若弹窗不出现，去
+开发人员选项点 **撤销 USB 调试授权**，或把 USB 调试**关掉再打开**，强制重新弹一次。
+
+**④ 手机侧前置条件**
+
+- USB 连接方式不能是"**仅充电**"（仅充电模式不暴露 adb 接口）→ 切 **传输文件(MTP)**。
+- 开发人员选项里 **USB 调试** 必须打开。
+- 状态栏"已连接 USB 调试"只说明开关是开的，**不代表电脑已经认到设备**。
+
+**⑤ HDB 和 adb 是两条独立通道**
+
+荣耀手机助手走 HDB（`VID_339B&PID_xxxx&MI_03`），adb 走 MI_02。HDB 报错
+**不影响** adb，别为了 adb 去折腾手机助手。
+
+**⑥ 想看电脑到底认没认到这台手机**
+
+```bash
+reg query "HKLM\SYSTEM\CurrentControlSet\Enum\USB" | grep -i 339B
+```
+
+荣耀的 USB 厂商 ID 是 `VID_339B`。注意：注册表条目**含历史缓存**，只能用来确认
+"这台机器曾经认过这台设备"，判断当前是否在线要用 `Get-PnpDevice -PresentOnly`。
+
 ## Windows 坑位
 
 - 拉起 App 优先用 `am start -n pkg/.Activity`，别用 `force-stop` + `monkey` ——
@@ -100,6 +142,7 @@ python scripts/gh_push_via_api.py <owner>/<repo> main README.md SKILL.md
 - 如果之后要有别的工具读截图，写到它能访问的位置，**别写 `/tmp`**
   （部分沙箱读不回来）。
 - Windows 版 `python.exe` **不认 Git-Bash 的 `/c/...` 路径** —— 传 `C:/...`。
+- `wmic` 在 Windows 11 26200 已移除；`pnputil` 输出是 UTF-16 且在部分沙箱里拿不到。
 
 ## 免责声明
 
