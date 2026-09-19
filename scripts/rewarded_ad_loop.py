@@ -24,7 +24,8 @@ import sys
 import time
 
 from android_control import (adb, bring_front, deny_honor_jump, dump_texts,
-                             find_bounds, focus, force_stop, keep_awake, tap)
+                             ensure_ready, find_bounds, focus, force_stop,
+                             keep_awake, tap)
 
 COUNTDOWN_RE = re.compile(r'(\d+)\s*s后可领取奖励')
 READY_TEXTS = ("领取成功",)          # 穿山甲: reward banked, pill now skippable
@@ -129,6 +130,14 @@ def main():
     cfg.skip = parse_xy(args.skip)
     cfg.deny = parse_xy(args.deny)
 
+    serial = ensure_ready()
+    if not serial:
+        print("ERROR: no authorized device. Plug in the phone, turn on USB 调试, "
+              "and tap 允许 on the device (both adb USB backends were tried).",
+              flush=True)
+        return 1
+    print(f"device ready: {serial}", flush=True)
+
     if not args.no_stayon:
         keep_awake()
 
@@ -144,7 +153,8 @@ def main():
         time.sleep(1)
         print(f"    elapsed {time.time()-t0:.0f}s", flush=True)
     print(f"DONE {args.count} ads in {time.time()-t0:.0f}s", flush=True)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
