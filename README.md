@@ -7,6 +7,10 @@
 实测环境：**Windows (Git Bash) + 荣耀 MagicOS / Android 17**（机型 `AAP-AN00`，
 1272×2800）。
 
+> **安卓独立版**：[`android-app/`](android-app/) 是同一套逻辑的手机端移植
+> （Kotlin 无障碍服务），**不插电脑也能跑**，直接装
+> `android-app/app-debug-v0.3.apk`。详见其 README。
+
 > 仅供**自己设备、自己账号**上的个人实验。自动化刷激励广告可能违反目标 App
 > 用户协议和广告主政策，风险自担，别拿去规模化刷量。
 
