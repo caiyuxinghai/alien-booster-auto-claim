@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">claimer</string>
+    <string name="service_desc">自动执行每日固定 UI 流程</string>
+</resources>
