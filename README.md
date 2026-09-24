@@ -19,7 +19,7 @@ Kotlin 无障碍服务，零第三方依赖。核心机制：
 
 构建：AGP 8.7.3 + Kotlin 2.0.21 + Gradle 8.9，`gradle assembleDebug`（无 wrapper，需自行准备 `local.properties` 指向本机 SDK）。
 
-### `pc-scripts/` — PC 端方案（手机插电脑，adb 驱动）
+### `scripts/` — PC 端方案（手机插电脑，adb 驱动）
 - `patient_loop.py`：主循环（单实例锁/真值校验/退避/adb 看门狗）
 - `rewarded_ad_loop.py`：单轮广告观看（状态枚举/闪退快速通道/冻帧检测）
 - `android_control.py`：adb 工具层（设备锁定/网络探针/锁屏守卫）

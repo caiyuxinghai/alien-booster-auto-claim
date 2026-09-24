@@ -1,0 +1,3 @@
+# Only scripts/find_region.py needs a third-party package.
+# android_control.py and rewarded_ad_loop.py are stdlib-only.
+pillow>=10.0
