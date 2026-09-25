@@ -22,6 +22,7 @@ object Schedule {
     const val KEY_HOUR = "hour"
     const val KEY_MINUTE = "minute"
     const val KEY_START_WITHOUT_WIFI = "start_without_wifi"
+    const val KEY_SCHEDULE = "schedule_enabled"
     const val CHANNEL = "claim_alarm"
 
     private const val REQ_DAILY = 11
@@ -49,8 +50,15 @@ object Schedule {
         arm(ctx)
     }
 
+    fun scheduleEnabled(ctx: Context) = prefs(ctx).getBoolean(KEY_SCHEDULE, true)
+
+    fun setScheduleEnabled(ctx: Context, enabled: Boolean) {
+        prefs(ctx).edit().putBoolean(KEY_SCHEDULE, enabled).apply()
+        if (enabled) arm(ctx) else disarm(ctx)
+    }
+
     fun shouldCatchUp(ctx: Context): Boolean {
-        if (isDoneToday(ctx)) return false
+        if (!scheduleEnabled(ctx) || isDoneToday(ctx)) return false
         val last = prefs(ctx).getLong("last_attempt", 0L)
         if (System.currentTimeMillis() - last < 90_000) return false
         val c = Calendar.getInstance()
@@ -63,12 +71,24 @@ object Schedule {
     }
 
     fun arm(ctx: Context) {
+        if (!scheduleEnabled(ctx)) {
+            disarm(ctx)
+            return
+        }
         val trigger = nextDailyMillis(ctx)
         schedule(ctx, REQ_DAILY, trigger)
         prefs(ctx).edit().putLong(KEY_NEXT, trigger).apply()
     }
 
+    fun disarm(ctx: Context) {
+        val am = ctx.getSystemService(AlarmManager::class.java) ?: return
+        am.cancel(pending(ctx, REQ_DAILY))
+        am.cancel(pending(ctx, REQ_RETRY))
+        prefs(ctx).edit().putLong(KEY_NEXT, 0L).apply()
+    }
+
     fun armRetry(ctx: Context, delayMs: Long) {
+        if (!scheduleEnabled(ctx)) return
         val day = today(ctx)
         val p = prefs(ctx)
         val count = if (p.getString(KEY_RETRY_DAY, "") == day) p.getInt(KEY_RETRY, 0) else 0

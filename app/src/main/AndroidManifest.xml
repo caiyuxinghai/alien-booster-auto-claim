@@ -18,6 +18,8 @@
     </queries>
 
     <application
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:label="外星仔领时长"
         android:theme="@style/AppTheme"
         android:allowBackup="false">

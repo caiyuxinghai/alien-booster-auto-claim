@@ -7,6 +7,10 @@ import android.content.Intent
 class DailyReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
         if (intent?.action != ACTION_RUN) return
+        if (!Schedule.scheduleEnabled(context)) {
+            Schedule.disarm(context)
+            return
+        }
         if (Schedule.isDoneToday(context)) {
             Schedule.arm(context)
             return

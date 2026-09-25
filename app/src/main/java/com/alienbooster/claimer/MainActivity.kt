@@ -25,8 +25,11 @@ class MainActivity : Activity() {
     private lateinit var statusNext: TextView
     private lateinit var timeValue: TextView
     private lateinit var wifiSwitch: Switch
+    private lateinit var scheduleSwitch: Switch
+    private lateinit var rowTime: View
     private lateinit var logView: TextView
     private lateinit var logScroll: ScrollView
+    private var switchesBound = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -42,10 +45,12 @@ class MainActivity : Activity() {
         statusNext = findViewById(R.id.status_next)
         timeValue = findViewById(R.id.time_value)
         wifiSwitch = findViewById(R.id.switch_nowifi)
+        scheduleSwitch = findViewById(R.id.switch_schedule)
+        rowTime = findViewById(R.id.row_time)
         logView = findViewById(R.id.log_view)
         logScroll = findViewById(R.id.log_scroll)
 
-        findViewById<View>(R.id.row_time).setOnClickListener { pickTime() }
+        rowTime.setOnClickListener { pickTime() }
         findViewById<Button>(R.id.btn_start).setOnClickListener { onStartClicked() }
         findViewById<Button>(R.id.btn_stop).setOnClickListener {
             AdClaimService.requestStop()
@@ -53,11 +58,6 @@ class MainActivity : Activity() {
         }
         findViewById<Button>(R.id.btn_a11y).setOnClickListener {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-        }
-        wifiSwitch.setOnCheckedChangeListener { _, checked ->
-            if (checked != Schedule.startWithoutWifi(this)) {
-                Schedule.setStartWithoutWifi(this, checked)
-            }
         }
 
         Schedule.arm(this)
@@ -74,6 +74,7 @@ class MainActivity : Activity() {
         super.onResume()
         AdClaimService.logListener = { line -> runOnUiThread { append(line) } }
         refresh()
+        bindSwitches()
         val file = File(filesDir, "claimer.log")
         logView.text = if (file.exists()) {
             file.readLines().takeLast(40).joinToString("\n")
@@ -112,7 +113,10 @@ class MainActivity : Activity() {
             { _, hour, minute ->
                 Schedule.setClock(this, hour, minute)
                 refresh()
-                toast("每天 %02d:%02d 启动".format(hour, minute))
+                toast(
+                    if (Schedule.scheduleEnabled(this)) "每天 %02d:%02d 启动".format(hour, minute)
+                    else "已记下 %02d:%02d，打开定时后生效".format(hour, minute)
+                )
             },
             Schedule.hour(this),
             Schedule.minute(this),
@@ -127,15 +131,37 @@ class MainActivity : Activity() {
         val running = if (AdClaimService.isRunning()) "领取中" else "空闲"
         val done = if (Schedule.isDoneToday(this)) "今日已领完" else "今日未完成"
         statusToday.text = "$running · $done"
+        val scheduled = Schedule.scheduleEnabled(this)
         val nextMs = Schedule.prefs(this).getLong(Schedule.KEY_NEXT, 0L)
-        statusNext.text = if (nextMs > 0) {
-            "下次 " + SimpleDateFormat("M月d日 HH:mm", Locale.CHINA).format(Date(nextMs))
-        } else {
-            "下次尚未安排"
+        statusNext.text = when {
+            !scheduled -> "定时启动已关闭"
+            nextMs > 0 -> "下次 " + SimpleDateFormat("M月d日 HH:mm", Locale.CHINA).format(Date(nextMs))
+            else -> "下次尚未安排"
         }
         timeValue.text = "%02d:%02d".format(Schedule.hour(this), Schedule.minute(this))
+        rowTime.alpha = if (scheduled) 1f else 0.45f
+        if (scheduleSwitch.isChecked != scheduled) scheduleSwitch.isChecked = scheduled
         val allow = Schedule.startWithoutWifi(this)
         if (wifiSwitch.isChecked != allow) wifiSwitch.isChecked = allow
+    }
+
+    private fun bindSwitches() {
+        if (switchesBound) return
+        switchesBound = true
+        wifiSwitch.setOnCheckedChangeListener { _, checked ->
+            if (checked != Schedule.startWithoutWifi(this)) {
+                Schedule.setStartWithoutWifi(this, checked)
+            }
+        }
+        scheduleSwitch.setOnCheckedChangeListener { _, checked ->
+            if (checked == Schedule.scheduleEnabled(this)) return@setOnCheckedChangeListener
+            Schedule.setScheduleEnabled(this, checked)
+            refresh()
+            toast(
+                if (checked) "每天 %02d:%02d 自动启动".format(Schedule.hour(this), Schedule.minute(this))
+                else "已关闭定时启动"
+            )
+        }
     }
 
     private fun append(line: String) {
