@@ -94,7 +94,7 @@ object Schedule {
         arm(ctx)
     }
 
-    fun startWithoutWifi(ctx: Context) = prefs(ctx).getBoolean(KEY_START_WITHOUT_WIFI, true)
+    fun startWithoutWifi(ctx: Context) = prefs(ctx).getBoolean(KEY_START_WITHOUT_WIFI, false)
 
     fun setStartWithoutWifi(ctx: Context, allow: Boolean) {
         prefs(ctx).edit().putBoolean(KEY_START_WITHOUT_WIFI, allow).apply()
