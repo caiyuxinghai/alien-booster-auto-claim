@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg">#0B0C10</color>
+    <color name="card">#171923</color>
+    <color name="row">#212433</color>
+    <color name="stroke">#2C3042</color>
+    <color name="text">#F4F6FB</color>
+    <color name="muted">#9AA3B8</color>
+    <color name="purple">#8B6CFF</color>
+    <color name="purple_deep">#6A4DE0</color>
+    <color name="log_bg">#101218</color>
+    <color name="log_text">#D5DCF0</color>
+    <color name="ok">#3DDC97</color>
+</resources>

@@ -1,6 +1,8 @@
-__pycache__/
-*.pyc
 .gradle/
-build/
+**/build/
 local.properties
+.idea/
+*.iml
+captures/
 *.apk
+.DS_Store
