@@ -65,9 +65,13 @@ class AdClaimService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val pkg = event?.packageName?.toString()
-        val cls = event?.className?.toString()
         if (!pkg.isNullOrEmpty()) curPkg = pkg
-        if (!cls.isNullOrEmpty()) curCls = cls
+        // 只有 WINDOW_STATE_CHANGED 的 className 才是 Activity 类名；
+        // CONTENT_CHANGED 的 className 是控件名（FrameLayout 等），会覆盖 curCls 导致 isMain 永远为假。
+        if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            val cls = event.className?.toString()
+            if (!cls.isNullOrEmpty()) curCls = cls
+        }
     }
 
     override fun onInterrupt() {
@@ -136,6 +140,22 @@ class AdClaimService : AccessibilityService() {
                             continue
                         } else {
                             log("baseline counter=$base")
+                        }
+                    }
+                    // 兜底补检：抓残留广告 / 上一轮 verify 间隙的延迟入账（PC 版 [pre] 同款）
+                    val cur = readCounter()
+                    if (cur != null) {
+                        if (cur > base!!) {
+                            val g = cur - base!!
+                            done++
+                            gainedTotal += g
+                            base = cur
+                            noOpenStreak = 0
+                            unpaidStreak = 0
+                            log("[$i] late +$g (today +$gainedTotal)")
+                        } else if (cur < base!! - 2) {
+                            log("base dropped $base->$cur -> rebase")
+                            base = cur
                         }
                     }
                     when (doTask(i)) {
@@ -346,6 +366,18 @@ class AdClaimService : AccessibilityService() {
         return null
     }
 
+    // 广告关闭确认框：「坚持退出 / 残忍离开 / 狠心离开」等文案，按文本定位后点击。
+    private fun isAdExitDialog(): Boolean {
+        val (texts, _) = collectTexts()
+        return texts.any { it.contains("确定要退出吗") || it.contains("坚持退出") || it.contains("狠心离开") || it.contains("残忍离开") || it.contains("确认退出") }
+    }
+
+    private fun tapAdExitDialog() {
+        val (_, nodes) = collectTexts()
+        val pt = findAnyCenter(nodes, listOf("坚持退出", "狠心离开", "残忍离开", "确认退出", "退出"))
+        if (pt != null) tap(pt.first, pt.second)
+    }
+
     private fun isAd(): Boolean {
         val id = "$curPkg|$curCls".lowercase()
         return AD_HINTS.any { id.contains(it) }
@@ -426,13 +458,47 @@ class AdClaimService : AccessibilityService() {
         }
     }
 
+    // PC 版经验：残留广告不是「异常」而是「晚开的正常广告」。
+    // 强行关闭会丢弃已播时长的奖励。正确做法：领养它，等它播完，再按正常流程收尾。
+    private fun adoptOrphanAd() {
+        log("orphan ad detected -> adopt and watch it out")
+        val openAt = SystemClock.elapsedRealtime()
+        var lastSkip = 0L
+        while (!stopFlag && isAd()) {
+            checkStop()
+            val elapsed = SystemClock.elapsedRealtime() - openAt
+            if (elapsed > UNKNOWN_MAX_MS) break
+            // 播满 SAFE_VIDEO_MS 后开始尝试跳过（等同 PC 的 skip_after）
+            if (elapsed >= SAFE_VIDEO_MS && SystemClock.elapsedRealtime() - lastSkip >= 4000) {
+                tap(SKIP_XY.first, SKIP_XY.second)
+                lastSkip = SystemClock.elapsedRealtime()
+                sleep(1200)
+                if (isAdExitDialog()) {
+                    tapAdExitDialog()
+                    sleep(1000)
+                }
+            }
+            sleep(FOCUS_POLL_MS)
+        }
+        if (isAd()) {
+            tap(SKIP_XY.first, SKIP_XY.second)
+            sleep(1200)
+            if (isAdExitDialog()) {
+                tapAdExitDialog()
+                sleep(1000)
+            }
+            if (isAd()) back()
+            sleep(800)
+        }
+    }
+
     private fun ensureMain(budgetMs: Long = 60_000L): Boolean {
         val deadline = SystemClock.elapsedRealtime() + budgetMs
         while (SystemClock.elapsedRealtime() < deadline) {
             checkStop()
             if (isMain()) return true
             if (isAd()) {
-                sleep(2000)
+                adoptOrphanAd()
                 continue
             }
             if (isHonorDialog()) {
@@ -608,6 +674,10 @@ class AdClaimService : AccessibilityService() {
     private fun closeTask(i: Int, reason: String) {
         if (isAd()) {
             back()
+            sleep(800)
+        }
+        if (isAdExitDialog()) {
+            tapAdExitDialog()
             sleep(800)
         }
         if (isAd()) {
