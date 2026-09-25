@@ -2,6 +2,9 @@ package com.alienbooster.claimer
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.app.KeyguardManager
 import android.app.Notification
 import android.app.NotificationChannel
@@ -370,22 +373,14 @@ class AdClaimService : AccessibilityService() {
     }
 
     private fun netOk(): Boolean {
-        var process: Process? = null
+        // 无 INTERNET 权限下 ping 被内核拒绝（sendmsg EPERM），改用系统连通性判定；
+        // 判定失败时按有网处理（fail-open），宁可白试一轮也不能误判断网瘫痪循环。
         return try {
-            process = Runtime.getRuntime().exec(arrayOf("/system/bin/ping", "-c", "1", "-W", "3", "223.5.5.5"))
-            val finished = process.waitFor(8, TimeUnit.SECONDS)
-            if (!finished) {
-                process.destroy()
-                false
-            } else {
-                process.exitValue() == 0
-            }
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
         } catch (_: Exception) {
-            try {
-                process?.destroy()
-            } catch (_: Exception) {
-            }
-            false
+            true
         }
     }
 
