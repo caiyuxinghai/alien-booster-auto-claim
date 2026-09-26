@@ -221,74 +221,45 @@ class AdClaimService : AccessibilityService() {
     }
 
     private fun watchAd(i: Int): TaskResult {
-        val (texts0, bounds0) = collectTexts()
-        val exp = experienceSeconds(texts0)
-        if (exp != null) {
-            log("[$i] experience ${exp}s")
-            tapExperience(bounds0)
-            val end = SystemClock.elapsedRealtime() + (exp + 3) * 1000L
-            while (SystemClock.elapsedRealtime() < end && !stopFlag.get()) {
-                allowJump()
-                sleep(1000)
-            }
-            repeat(4) {
-                refreshFromRoot()
-                if (isMain()) return@repeat
-                allowJump()
-                back()
-                sleep(700)
-            }
-            val (t2, b2) = collectTexts()
-            if (t2.any { it.contains("跳过") } || t2.any { t -> READY.any { t.contains(it) } }) {
-                tapText(b2, "跳过")
-                sleep(800)
-            }
-            closeAd("[$i] experience done")
-            return TaskResult.WATCHED
-        }
-        val id = "$curPkg|$curCls".lowercase()
-        if (id.contains("kwad") || id.contains("ksad")) {
-            val end = SystemClock.elapsedRealtime() + KWAI_WAIT_MS
-            while (SystemClock.elapsedRealtime() < end && !stopFlag.get()) {
-                dismissOverlays()
-                if (isMain()) break
-                sleep(1000)
-            }
-            closeAd("[$i] kwai -> waited ${KWAI_WAIT_MS / 1000}s")
-            return TaskResult.WATCHED
-        }
-        val end = SystemClock.elapsedRealtime() + AD_CAP_MS
-        var sawText = false
+        val seconds = readRequiredSeconds()
+        val waitSec = seconds ?: (KWAI_WAIT_MS / 1000).toInt()
+        log(if (seconds != null) "[$i] stay ${waitSec}s on ad" else "[$i] stay ${waitSec}s (no timer text)")
+        val end = SystemClock.elapsedRealtime() + (waitSec + 1) * 1000L
         while (SystemClock.elapsedRealtime() < end && !stopFlag.get()) {
-            dismissOverlays()
-            if (isMain()) break
-            val (texts, bounds) = collectTexts()
-            if (texts.isNotEmpty()) sawText = true
-            if (texts.any { t -> READY.any { r -> t.contains(r) } && COUNTDOWN.none { it.containsMatchIn(t) } }) {
-                tapText(bounds, "跳过")
-                sleep(800)
-                closeAd("[$i] ready -> skip")
-                return TaskResult.WATCHED
-            }
-            val cd = readCountdown(texts)
-            if (cd != null) {
-                log("[$i] countdown ${cd}s")
-                sleep((cd - 1).coerceAtLeast(1) * 1000L)
-                dismissOverlays()
-                val again = collectTexts().second
-                tapText(again, "跳过")
-                sleep(800)
-                closeAd("[$i] countdown -> skip")
-                return TaskResult.WATCHED
-            }
-            if (!sawText && SystemClock.elapsedRealtime() + 20_000 < end) {
-                sleep(1000)
-                continue
+            refreshFromRoot()
+            if (isHonorDialog()) {
+                tapText(collectTexts().second, "拒绝", DENY)
+            } else if (!isAd() && curPkg.isNotEmpty() && curPkg != PKG && curPkg != packageName) {
+                back()
             }
             sleep(1000)
         }
-        closeAd("[$i] timed close")
+        leaveAndReenter("[$i] stayed ${waitSec}s, reopen")
         return TaskResult.WATCHED
+    }
+
+    private fun readRequiredSeconds(): Int? {
+        val deadline = SystemClock.elapsedRealtime() + 4_000
+        while (SystemClock.elapsedRealtime() < deadline && !stopFlag.get()) {
+            val texts = collectTexts().first
+            val found = experienceSeconds(texts) ?: readCountdown(texts)
+            if (found != null) return found
+            sleep(400)
+        }
+        return null
+    }
+
+    private fun leaveAndReenter(reason: String) {
+        onMain { performGlobalAction(GLOBAL_ACTION_HOME) }
+        sleep(1200)
+        bringFront()
+        sleep(1600)
+        refreshFromRoot()
+        if (!isMain()) {
+            bringFront()
+            sleep(1200)
+        }
+        log(reason)
     }
 
     private fun waitCredit(before: Int?, beforeP: String, wallStart: Long): Int {
@@ -458,29 +429,6 @@ class AdClaimService : AccessibilityService() {
             if (n != null && n in 3..60) return n
         }
         return null
-    }
-
-    private fun tapExperience(bounds: List<Pair<String, Rect>>) {
-        val labels = listOf("立即前往加速", "立即前往", "去体验", "立即打开", "去看看")
-        for (label in labels) {
-            if (bounds.any { it.first.contains(label) }) {
-                tapText(bounds, label)
-                return
-            }
-        }
-    }
-
-    private fun allowJump() {
-        val (texts, bounds) = collectTexts()
-        if (texts.any { it.contains("想要打开") || it.contains("是否允许") }) {
-            val label = listOf("允许", "打开", "始终允许").firstOrNull { l ->
-                texts.any { it == l || it.contains(l) }
-            }
-            if (label != null) {
-                tapText(bounds, label)
-                sleep(800)
-            }
-        }
     }
 
     private fun readCountdown(texts: List<String>): Int? {
