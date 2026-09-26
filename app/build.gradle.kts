@@ -11,8 +11,8 @@ android {
         applicationId = "com.alienbooster.claimer"
         minSdk = 26
         targetSdk = 34
-        versionCode = 19
-        versionName = "0.5.4"
+        versionCode = 22
+        versionName = "0.5.7"
     }
 
     buildTypes {

@@ -179,7 +179,7 @@ class AdClaimService : AccessibilityService() {
                         }
                     }
                 }
-                sleep(800)
+                sleep(200)
             }
             }
         } catch (e: Exception) {
@@ -201,12 +201,10 @@ class AdClaimService : AccessibilityService() {
 
     private fun doTask(i: Int): TaskResult {
         if (quotaDone()) return TaskResult.QUOTA
-        val btn = findWatchPoint()
-        if (btn == null) {
+        if (!clickWatchButton()) {
             log("[$i] 没有「看广告 领时长」按钮")
             return if (quotaDone()) TaskResult.QUOTA else TaskResult.NO_OPEN
         }
-        tap(btn.first, btn.second)
         val openedAt = SystemClock.elapsedRealtime()
         if (!waitAdOpen(12_000)) {
             if (quotaDone()) return TaskResult.QUOTA
@@ -221,49 +219,119 @@ class AdClaimService : AccessibilityService() {
     }
 
     private fun watchAd(i: Int): TaskResult {
-        val seconds = readRequiredSeconds()
-        val waitSec = seconds ?: (KWAI_WAIT_MS / 1000).toInt()
-        log(if (seconds != null) "[$i] stay ${waitSec}s on ad" else "[$i] stay ${waitSec}s (no timer text)")
-        val end = SystemClock.elapsedRealtime() + (waitSec + 1) * 1000L
+        val first = peekSeconds()
+        val waitSec = first ?: 15
+        val started = SystemClock.elapsedRealtime()
+        var end = started + waitSec * 1000L
+        var last = first
+        log(if (first != null) "[$i] stay ${waitSec}s on ad" else "[$i] stay 15s (no timer text)")
         while (SystemClock.elapsedRealtime() < end && !stopFlag.get()) {
+            val now = SystemClock.elapsedRealtime()
+            val seen = peekSeconds()
+            if (first != null && seen != null && last != null && seen <= last) {
+                val elapsed = ((now - started) / 1000).toInt()
+                val expected = (first - elapsed).coerceAtLeast(0)
+                if (kotlin.math.abs(seen - expected) <= 2) {
+                    last = seen
+                    if (seen <= 0) break
+                    end = minOf(end, now + seen * 1000L)
+                }
+            }
             refreshFromRoot()
             if (isHonorDialog()) {
                 tapText(collectTexts().second, "拒绝", DENY)
-            } else if (!isAd() && curPkg.isNotEmpty() && curPkg != PKG && curPkg != packageName) {
+            } else if (!onAdScreen() && curPkg.isNotEmpty() && curPkg != packageName && !isLauncher(curPkg)) {
                 back()
             }
-            sleep(1000)
+            sleep(400)
         }
-        leaveAndReenter("[$i] stayed ${waitSec}s, reopen")
+        val stayed = ((SystemClock.elapsedRealtime() - started) / 1000).toInt()
+        if (backToMainCredited(lastProgress)) {
+            log("[$i] stayed ${stayed}s, back credited")
+        } else {
+            leaveAndReenter("[$i] stayed ${stayed}s, reopen")
+        }
         return TaskResult.WATCHED
     }
 
-    private fun readRequiredSeconds(): Int? {
-        val deadline = SystemClock.elapsedRealtime() + 4_000
-        while (SystemClock.elapsedRealtime() < deadline && !stopFlag.get()) {
-            val texts = collectTexts().first
-            val found = experienceSeconds(texts) ?: readCountdown(texts)
-            if (found != null) return found
-            sleep(400)
+    private fun backToMainCredited(beforeP: String): Boolean {
+        if (!isMain()) {
+            back()
+            sleep(250)
+            val (texts, bounds) = collectTexts()
+            val leave = LEAVE.firstOrNull { label -> texts.any { it.contains(label) } }
+            if (leave != null) {
+                tapText(bounds, leave)
+                sleep(300)
+            }
         }
-        return null
+        val deadline = SystemClock.elapsedRealtime() + 1_200
+        while (SystemClock.elapsedRealtime() < deadline && !stopFlag.get()) {
+            refreshFromRoot()
+            if (isMain() && homeReady()) {
+                if (quotaDone()) return true
+                val nowP = progressToken()
+                if (beforeP.isNotEmpty() && nowP.isNotEmpty() && nowP != beforeP) return true
+            }
+            sleep(200)
+        }
+        return false
+    }
+
+    private fun clickWatchButton(): Boolean {
+        val clicked = onMain {
+            val root = rootInActiveWindow ?: return@onMain false
+            var best: AccessibilityNodeInfo? = null
+            var bestY = -1
+            for (label in listOf("领时长", "点击重试")) {
+                val nodes = root.findAccessibilityNodeInfosByText(label) ?: continue
+                for (node in nodes) {
+                    val rect = Rect()
+                    node.getBoundsInScreen(rect)
+                    if (rect.centerY() >= bestY) {
+                        best = node
+                        bestY = rect.centerY()
+                    }
+                }
+            }
+            var current = best
+            var performed = false
+            while (current != null && !performed) {
+                if (current.isClickable && current.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                    performed = true
+                } else {
+                    current = current.parent
+                }
+            }
+            performed
+        } ?: false
+        if (clicked) return true
+        val point = findWatchPoint() ?: return false
+        tap(point.first, point.second)
+        return true
+    }
+
+    private fun peekSeconds(): Int? {
+        val texts = collectTexts().first
+        return experienceSeconds(texts) ?: readCountdown(texts)
     }
 
     private fun leaveAndReenter(reason: String) {
         onMain { performGlobalAction(GLOBAL_ACTION_HOME) }
-        sleep(1200)
+        sleep(350)
         bringFront()
-        sleep(1600)
-        refreshFromRoot()
-        if (!isMain()) {
-            bringFront()
-            sleep(1200)
+        val deadline = SystemClock.elapsedRealtime() + 2_500
+        while (SystemClock.elapsedRealtime() < deadline && !stopFlag.get()) {
+            refreshFromRoot()
+            if (isMain() && homeReady()) break
+            sleep(200)
         }
+        if (!isMain()) bringFront()
         log(reason)
     }
 
     private fun waitCredit(before: Int?, beforeP: String, wallStart: Long): Int {
-        val deadline = SystemClock.elapsedRealtime() + 20_000
+        val deadline = SystemClock.elapsedRealtime() + 5_000
         var best = 0
         while (SystemClock.elapsedRealtime() < deadline && !stopFlag.get()) {
             if (!isMain()) {
@@ -282,7 +350,7 @@ class AdClaimService : AccessibilityService() {
                 return if (best >= MIN_REWARD_SEC) best else MIN_REWARD_SEC
             }
             if (quotaDone()) return best
-            sleep(1000)
+            sleep(300)
         }
         return best
     }
@@ -332,17 +400,21 @@ class AdClaimService : AccessibilityService() {
         val end = SystemClock.elapsedRealtime() + timeoutMs
         while (SystemClock.elapsedRealtime() < end && !stopFlag.get()) {
             refreshFromRoot()
-            if (isAd()) return true
+            if (onAdScreen()) return true
             if (isHonorDialog()) {
                 tapText(collectTexts().second, "拒绝", DENY)
-                sleep(600)
+                sleep(400)
             }
-            if (curPkg.isNotEmpty() && curPkg != PKG && curPkg != packageName && !isLauncher(curPkg)) {
-                return true
-            }
-            sleep(300)
+            sleep(200)
         }
-        return isAd()
+        return onAdScreen()
+    }
+
+    private fun onAdScreen(): Boolean {
+        if (isHonorDialog()) return false
+        if (isAd()) return true
+        if (curPkg == PKG && curCls.isNotEmpty() && !curCls.endsWith("MainActivity")) return true
+        return curPkg.isNotEmpty() && curPkg != PKG && curPkg != packageName && !isLauncher(curPkg)
     }
 
     private fun closeAd(reason: String) {
