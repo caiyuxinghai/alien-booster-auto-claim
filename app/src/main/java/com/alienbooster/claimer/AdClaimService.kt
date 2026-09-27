@@ -113,7 +113,7 @@ class AdClaimService : AccessibilityService() {
                     break
                 }
                 refreshFromRoot()
-                if (isAd()) {
+                if (isAd() || looksLikeAd(collectTexts().first)) {
                     log("[$i] orphan ad")
                     val beforeP = lastProgress
                     val wall = SystemClock.elapsedRealtime()
@@ -206,10 +206,14 @@ class AdClaimService : AccessibilityService() {
             return if (quotaDone()) TaskResult.QUOTA else TaskResult.NO_OPEN
         }
         val openedAt = SystemClock.elapsedRealtime()
-        if (!waitAdOpen(12_000)) {
+        if (!waitAdOpen(8_000)) {
             if (quotaDone()) return TaskResult.QUOTA
-            log("[$i] task page not opened")
-            return TaskResult.NO_OPEN
+            if (isAd() || looksLikeAd(collectTexts().first)) {
+                log("[$i] ad already open")
+            } else {
+                log("[$i] task page not opened")
+                return TaskResult.NO_OPEN
+            }
         }
         if (SystemClock.elapsedRealtime() - openedAt < 1200 && isMain()) {
             log("[$i] task page flashed")
@@ -222,7 +226,7 @@ class AdClaimService : AccessibilityService() {
         val first = peekSeconds()
         val waitSec = first ?: 15
         val started = SystemClock.elapsedRealtime()
-        var end = started + waitSec * 1000L
+        var end = minOf(started + waitSec * 1000L, started + AD_CAP_MS)
         var last = first
         log(if (first != null) "[$i] stay ${waitSec}s on ad" else "[$i] stay 15s (no timer text)")
         while (SystemClock.elapsedRealtime() < end && !stopFlag.get()) {
@@ -296,11 +300,14 @@ class AdClaimService : AccessibilityService() {
             }
             var current = best
             var performed = false
-            while (current != null && !performed) {
-                if (current.isClickable && current.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+            var hops = 0
+            while (current != null && !performed && hops < 8) {
+                hops++
+                val clickable = current.isClickable
+                val target = current
+                current = current.parent
+                if (clickable && target.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
                     performed = true
-                } else {
-                    current = current.parent
                 }
             }
             performed
@@ -400,14 +407,20 @@ class AdClaimService : AccessibilityService() {
         val end = SystemClock.elapsedRealtime() + timeoutMs
         while (SystemClock.elapsedRealtime() < end && !stopFlag.get()) {
             refreshFromRoot()
-            if (onAdScreen()) return true
+            if (onAdScreen() || looksLikeAd(collectTexts().first)) return true
             if (isHonorDialog()) {
                 tapText(collectTexts().second, "拒绝", DENY)
                 sleep(400)
             }
             sleep(200)
         }
-        return onAdScreen()
+        return onAdScreen() || looksLikeAd(collectTexts().first)
+    }
+
+    private fun looksLikeAd(texts: List<String>): Boolean {
+        val blob = texts.joinToString("")
+        return blob.contains("跳过") || blob.contains("立即前往") || blob.contains("可立即领奖") ||
+            blob.contains("领取奖励") || blob.contains("去体验") || blob.contains("去看")
     }
 
     private fun onAdScreen(): Boolean {
