@@ -90,7 +90,7 @@ class MainActivity : Activity() {
 
     private fun handleRunIntent(intent: Intent?) {
         if (intent?.getBooleanExtra(EXTRA_RUN, false) == true) {
-            AdClaimService.requestRun()
+            AdClaimService.requestRun(intent.getBooleanExtra(EXTRA_FORCE, false))
             window.decorView.post { moveTaskToBack(true) }
         }
     }
@@ -177,5 +177,6 @@ class MainActivity : Activity() {
 
     companion object {
         const val EXTRA_RUN = "run"
+        const val EXTRA_FORCE = "force"
     }
 }

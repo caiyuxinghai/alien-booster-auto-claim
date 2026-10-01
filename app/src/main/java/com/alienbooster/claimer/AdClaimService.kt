@@ -40,6 +40,7 @@ class AdClaimService : AccessibilityService() {
     private var screenLock: PowerManager.WakeLock? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private var lastProgress = ""
+    private var runForce = false
 
     override fun onServiceConnected() {
         instance = this
@@ -86,6 +87,9 @@ class AdClaimService : AccessibilityService() {
     }
 
     private fun runLoop() {
+        runForce = forceWatch
+        forceWatch = false
+        val rounds = if (runForce) 2 else MAX_ROUNDS
         val t0 = SystemClock.elapsedRealtime()
         var watched = 0
         var gainedMin = 0
@@ -98,6 +102,7 @@ class AdClaimService : AccessibilityService() {
                 log("未连接 Wi-Fi，按设置本次不启动")
                 holdForWifi = true
             } else {
+            if (runForce) log("测试：今日已看完，仍点按钮看 2 次")
             holdScreen()
             startInForeground()
             var netTries = 0
@@ -106,7 +111,7 @@ class AdClaimService : AccessibilityService() {
                 sleep(20_000)
                 netTries++
             }
-            for (i in 1..MAX_ROUNDS) {
+            for (i in 1..rounds) {
                 if (stopFlag.get()) break
                 if (!screenReady()) {
                     log("屏幕锁着或点不亮，稍后重试")
@@ -189,8 +194,8 @@ class AdClaimService : AccessibilityService() {
             if (!holdForWifi) {
                 log("DONE watched=$watched gained=+${gainedMin}min in ${dur}s finished=$finished")
             }
-            if (finished || (!holdForWifi && quotaDone())) Schedule.markDone(this, gainedMin)
-            else if (!stopFlag.get() && !Schedule.isDoneToday(this)) {
+            if (!runForce && (finished || (!holdForWifi && quotaDone()))) Schedule.markDone(this, gainedMin)
+            else if (!runForce && !stopFlag.get() && !Schedule.isDoneToday(this)) {
                 Schedule.armRetry(this, if (holdForWifi) 15 * 60_000L else 20 * 60_000L)
             }
             running.set(false)
@@ -201,56 +206,54 @@ class AdClaimService : AccessibilityService() {
 
     private fun doTask(i: Int): TaskResult {
         if (quotaDone()) return TaskResult.QUOTA
-        if (!clickWatchButton()) {
-            log("[$i] 没有「看广告 领时长」按钮")
+        if (!openAd(i)) {
+            log("[$i] task page not opened")
             return if (quotaDone()) TaskResult.QUOTA else TaskResult.NO_OPEN
         }
-        val openedAt = SystemClock.elapsedRealtime()
-        if (!waitAdOpen(8_000)) {
-            if (quotaDone()) return TaskResult.QUOTA
-            if (isAd() || looksLikeAd(collectTexts().first)) {
-                log("[$i] ad already open")
-            } else {
-                log("[$i] task page not opened")
-                return TaskResult.NO_OPEN
-            }
-        }
-        if (SystemClock.elapsedRealtime() - openedAt < 1200 && isMain()) {
-            log("[$i] task page flashed")
-            return TaskResult.NO_OPEN
-        }
+        log("[$i] ad $curCls")
         return watchAd(i)
     }
 
-    private fun watchAd(i: Int): TaskResult {
-        val first = peekSeconds()
-        val waitSec = first ?: 15
-        val started = SystemClock.elapsedRealtime()
-        var end = minOf(started + waitSec * 1000L, started + AD_CAP_MS)
-        var last = first
-        log(if (first != null) "[$i] stay ${waitSec}s on ad" else "[$i] stay 15s (no timer text)")
-        while (SystemClock.elapsedRealtime() < end && !stopFlag.get()) {
-            val now = SystemClock.elapsedRealtime()
-            val seen = peekSeconds()
-            if (first != null && seen != null && last != null && seen <= last) {
-                val elapsed = ((now - started) / 1000).toInt()
-                val expected = (first - elapsed).coerceAtLeast(0)
-                if (kotlin.math.abs(seen - expected) <= 2) {
-                    last = seen
-                    if (seen <= 0) break
-                    end = minOf(end, now + seen * 1000L)
-                }
+    /** Two taps, like the first version. Window-class only while waiting for the ad. */
+    private fun openAd(i: Int): Boolean {
+        for (attempt in 1..2) {
+            if (!clickWatchButton()) {
+                log("[$i] 没有看广告按钮")
+                return false
             }
-            refreshFromRoot()
-            if (isHonorDialog()) {
-                tapText(collectTexts().second, "拒绝", DENY)
-            } else if (!onAdScreen() && curPkg.isNotEmpty() && curPkg != packageName && !isLauncher(curPkg)) {
-                back()
+            if (waitAdOpen(8_000)) return true
+            if (attempt == 1) {
+                log("[$i] no ad opened -> retap")
+                sleep(800)
             }
-            sleep(400)
         }
-        val stayed = ((SystemClock.elapsedRealtime() - started) / 1000).toInt()
-        if (backToMainCredited(lastProgress)) {
+        return onAdScreen()
+    }
+
+    /**
+     * Stay the seconds shown on the ad, without walking the node tree.
+     * Tree walks on the main looper deadlock a WebView ad; the first version just slept.
+     */
+    private fun watchAd(i: Int): TaskResult {
+        val openedAt = SystemClock.elapsedRealtime()
+        val kwai = isKwai()
+        val seconds = if (kwai) (KWAI_WAIT_MS / 1000).toInt() else readShownSeconds(openedAt)
+        val remain = (seconds ?: 15).coerceIn(5, 60)
+        // The number on screen is time still left, counted from the moment we read it.
+        val end = minOf(SystemClock.elapsedRealtime() + remain * 1000L, openedAt + AD_CAP_MS)
+        log(when {
+            kwai -> "[$i] stay ${remain}s kwai"
+            seconds != null -> "[$i] stay ${remain}s on ad"
+            else -> "[$i] stay ${remain}s (no timer text)"
+        })
+        while (SystemClock.elapsedRealtime() < end && !stopFlag.get()) {
+            if (isHonorDialog()) tap(DENY.first, DENY.second)
+            val left = end - SystemClock.elapsedRealtime()
+            if (left <= 0) break
+            sleep(minOf(500L, left))
+        }
+        val stayed = ((SystemClock.elapsedRealtime() - openedAt) / 1000).toInt()
+        if (creditedOnMain(lastProgress)) {
             log("[$i] stayed ${stayed}s, back credited")
         } else {
             leaveAndReenter("[$i] stayed ${stayed}s, reopen")
@@ -258,64 +261,37 @@ class AdClaimService : AccessibilityService() {
         return TaskResult.WATCHED
     }
 
-    private fun backToMainCredited(beforeP: String): Boolean {
-        if (!isMain()) {
-            back()
-            sleep(250)
-            val (texts, bounds) = collectTexts()
-            val leave = LEAVE.firstOrNull { label -> texts.any { it.contains(label) } }
-            if (leave != null) {
-                tapText(bounds, leave)
-                sleep(300)
-            }
-        }
-        val deadline = SystemClock.elapsedRealtime() + 1_200
+    private fun creditedOnMain(beforeP: String): Boolean {
+        bringFront()
+        val deadline = SystemClock.elapsedRealtime() + 2_500
         while (SystemClock.elapsedRealtime() < deadline && !stopFlag.get()) {
-            refreshFromRoot()
             if (isMain() && homeReady()) {
                 if (quotaDone()) return true
                 val nowP = progressToken()
                 if (beforeP.isNotEmpty() && nowP.isNotEmpty() && nowP != beforeP) return true
             }
-            sleep(200)
+            sleep(250)
         }
         return false
     }
 
     private fun clickWatchButton(): Boolean {
-        val clicked = onMain {
-            val root = rootInActiveWindow ?: return@onMain false
-            var best: AccessibilityNodeInfo? = null
-            var bestY = -1
-            for (label in listOf("领时长", "点击重试")) {
-                val nodes = root.findAccessibilityNodeInfosByText(label) ?: continue
-                for (node in nodes) {
-                    val rect = Rect()
-                    node.getBoundsInScreen(rect)
-                    if (rect.centerY() >= bestY) {
-                        best = node
-                        bestY = rect.centerY()
-                    }
-                }
-            }
-            var current = best
-            var performed = false
-            var hops = 0
-            while (current != null && !performed && hops < 8) {
-                hops++
-                val clickable = current.isClickable
-                val target = current
-                current = current.parent
-                if (clickable && target.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                    performed = true
-                }
-            }
-            performed
-        } ?: false
-        if (clicked) return true
         val point = findWatchPoint() ?: return false
+        log("tap ${point.first},${point.second}")
         tap(point.first, point.second)
         return true
+    }
+
+    /** A few reads while the end card appears, then no further tree walks. */
+    private fun readShownSeconds(openedAt: Long): Int? {
+        for (at in longArrayOf(2_000L, 6_000L, 10_000L)) {
+            val pause = openedAt + at - SystemClock.elapsedRealtime()
+            if (pause > 0) sleep(pause)
+            if (isHonorDialog()) tap(DENY.first, DENY.second)
+            val seen = peekSeconds()
+            if (seen != null) return seen
+        }
+        return null
     }
 
     private fun peekSeconds(): Int? {
@@ -367,54 +343,50 @@ class AdClaimService : AccessibilityService() {
         var backs = 0
         var logged = ""
         while (SystemClock.elapsedRealtime() < end && !stopFlag.get()) {
-            refreshFromRoot()
             val focus = "$curPkg/$curCls"
             if (focus != logged) {
                 log("focus $focus")
                 logged = focus
             }
-            if (isMain() && homeReady()) return true
             when {
                 isAd() -> {
                     sleep(1500)
                     if (isAd()) closeAd("orphan ad")
                 }
                 isHonorDialog() -> {
-                    tapText(collectTexts().second, "拒绝", DENY)
-                    sleep(800)
+                    tap(DENY.first, DENY.second)
+                    sleep(600)
                 }
+                isMain() && homeReady() -> return true
                 curPkg == PKG -> {
                     backs++
                     back()
                     sleep(700)
                     if (backs >= 2) {
                         bringFront()
-                        sleep(1500)
+                        sleep(1200)
                         backs = 0
                     }
                 }
                 else -> {
                     bringFront()
-                    sleep(1600)
+                    sleep(1200)
                 }
             }
+            if (!isAd()) refreshFromRoot()
         }
-        refreshFromRoot()
         return isMain() && homeReady()
     }
 
     private fun waitAdOpen(timeoutMs: Long): Boolean {
         val end = SystemClock.elapsedRealtime() + timeoutMs
         while (SystemClock.elapsedRealtime() < end && !stopFlag.get()) {
-            refreshFromRoot()
-            if (onAdScreen() || looksLikeAd(collectTexts().first)) return true
-            if (isHonorDialog()) {
-                tapText(collectTexts().second, "拒绝", DENY)
-                sleep(400)
-            }
+            if (onAdScreen()) return true
+            if (isHonorDialog()) tap(DENY.first, DENY.second)
             sleep(200)
         }
-        return onAdScreen() || looksLikeAd(collectTexts().first)
+        if (onAdScreen()) return true
+        return looksLikeAd(collectTexts().first)
     }
 
     private fun looksLikeAd(texts: List<String>): Boolean {
@@ -431,37 +403,15 @@ class AdClaimService : AccessibilityService() {
     }
 
     private fun closeAd(reason: String) {
-        if (isAd() || (curPkg.isNotEmpty() && curPkg != PKG && curPkg != packageName)) {
-            dismissOverlays()
-            back()
-            sleep(700)
-            dismissOverlays()
-        }
-        if (!isMain()) {
+        bringFront()
+        sleep(1000)
+        if (isAd() || (curPkg.isNotEmpty() && curPkg != PKG && curPkg != packageName && !isLauncher(curPkg))) {
+            onMain { performGlobalAction(GLOBAL_ACTION_HOME) }
+            sleep(400)
             bringFront()
-            sleep(1200)
-        }
-        if (isAd()) {
-            back()
-            sleep(500)
-            bringFront()
-            sleep(1200)
+            sleep(1000)
         }
         log(reason)
-    }
-
-    private fun dismissOverlays() {
-        val (texts, bounds) = collectTexts()
-        if (texts.any { it.contains("想要打开") }) {
-            tapText(bounds, "拒绝", DENY)
-            sleep(600)
-            return
-        }
-        val leave = LEAVE.firstOrNull { label -> texts.any { it.contains(label) } }
-        if (leave != null) {
-            tapText(bounds, leave)
-            sleep(700)
-        }
     }
 
     private fun homeReady(): Boolean {
@@ -471,17 +421,29 @@ class AdClaimService : AccessibilityService() {
     }
 
     private fun quotaDone(): Boolean {
+        if (runForce) return false
         val texts = collectTexts().first
         return texts.any { QUOTA.containsMatchIn(it) }
     }
 
+    private fun isKwai(): Boolean {
+        val s = "$curPkg|$curCls".lowercase()
+        return s.contains("kwad") || s.contains("ksad")
+    }
+
     private fun findWatchPoint(): Pair<Int, Int>? {
         val (_, bounds) = collectTexts()
+        val labels = mutableListOf("领时长", "点击重试")
+        if (runForce) labels.addAll(listOf("明日再来", "今日广告已看完"))
         val hit = bounds
-            .filter { (t, _) -> t.contains("领时长") || t.contains("点击重试") }
+            .filter { (t, r) -> onScreen(r) && labels.any { label -> t.contains(label) } }
             .maxByOrNull { it.second.centerY() }
         if (hit != null) return hit.second.centerX() to hit.second.centerY()
         return WATCH
+    }
+
+    private fun onScreen(r: Rect): Boolean {
+        return r.left >= 0 && r.top >= 0 && r.right > r.left && r.bottom > r.top
     }
 
     private fun progressToken(): String {
@@ -517,17 +479,18 @@ class AdClaimService : AccessibilityService() {
     }
 
     private fun readCountdown(texts: List<String>): Int? {
-        for (t in texts) {
-            for (re in COUNTDOWN) {
-                val n = re.find(t)?.groupValues?.getOrNull(1)?.toIntOrNull()
-                if (n != null) return n
-            }
+        val blob = texts.joinToString("")
+        for (re in COUNTDOWN) {
+            val n = re.find(blob)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            if (n != null && n in 3..60) return n
         }
         return null
     }
 
     private fun isMain(): Boolean {
-        return curPkg == PKG && (curCls.endsWith("MainActivity") || curCls.isEmpty())
+        if (curPkg != PKG) return false
+        if (curCls.isEmpty()) return true
+        return curCls.startsWith(PKG) && curCls.endsWith("MainActivity")
     }
 
     private fun isAd(): Boolean {
@@ -544,19 +507,22 @@ class AdClaimService : AccessibilityService() {
         return pkg.contains("launcher") || pkg == "com.android.systemui" || pkg == "android"
     }
 
+    /** Off the main looper. A node query there waits for an event the looper can no longer deliver. */
     private fun refreshFromRoot() {
-        onMain {
-            val root = rootInActiveWindow ?: return@onMain
-            val pkg = root.packageName?.toString().orEmpty()
-            if (pkg.isNotEmpty()) curPkg = pkg
+        try {
+            val pkg = rootInActiveWindow?.packageName?.toString().orEmpty()
+            if (pkg.isEmpty() || pkg == curPkg) return
+            curPkg = pkg
+            curCls = ""
+        } catch (_: Exception) {
         }
     }
 
     private fun collectTexts(): Pair<List<String>, List<Pair<String, Rect>>> {
-        val out = onMain {
-            val texts = ArrayList<String>()
-            val bounds = ArrayList<Pair<String, Rect>>()
-            val root = rootInActiveWindow ?: return@onMain texts to bounds
+        val texts = ArrayList<String>()
+        val bounds = ArrayList<Pair<String, Rect>>()
+        try {
+            val root = rootInActiveWindow ?: return texts to bounds
             val stack = ArrayDeque<AccessibilityNodeInfo>()
             stack.add(root)
             var n = 0
@@ -576,36 +542,34 @@ class AdClaimService : AccessibilityService() {
                     node.getChild(i)?.let { stack.add(it) }
                 }
             }
-            texts to bounds
+        } catch (_: Exception) {
         }
-        return out ?: (emptyList<String>() to emptyList())
-    }
-
-    private fun tapText(bounds: List<Pair<String, Rect>>, label: String, fallback: Pair<Int, Int>? = null) {
-        val hit = bounds.firstOrNull { it.first.contains(label) }
-        if (hit != null) tap(hit.second.centerX(), hit.second.centerY())
-        else if (fallback != null) tap(fallback.first, fallback.second)
+        return texts to bounds
     }
 
     private fun tap(x: Int, y: Int) {
+        if (x < 0 || y < 0) return
         val latch = CountDownLatch(1)
         mainHandler.post {
-            val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
-            val stroke = GestureDescription.StrokeDescription(path, 0, 70)
-            val sent = dispatchGesture(
-                GestureDescription.Builder().addStroke(stroke).build(),
-                object : GestureResultCallback() {
-                    override fun onCompleted(gestureDescription: GestureDescription?) = latch.countDown()
-                    override fun onCancelled(gestureDescription: GestureDescription?) = latch.countDown()
-                },
-                null
-            )
-            if (!sent) latch.countDown()
+            try {
+                val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
+                val stroke = GestureDescription.StrokeDescription(path, 0, 70)
+                val sent = dispatchGesture(
+                    GestureDescription.Builder().addStroke(stroke).build(),
+                    object : GestureResultCallback() {
+                        override fun onCompleted(gestureDescription: GestureDescription?) = latch.countDown()
+                        override fun onCancelled(gestureDescription: GestureDescription?) = latch.countDown()
+                    },
+                    null
+                )
+                if (!sent) latch.countDown()
+            } catch (_: Exception) {
+                latch.countDown()
+            }
         }
         try {
             latch.await(2, TimeUnit.SECONDS)
         } catch (_: InterruptedException) {
-            stopFlag.set(true)
         }
     }
 
@@ -730,9 +694,9 @@ class AdClaimService : AccessibilityService() {
             }
         }
         try {
-            latch.await(3, TimeUnit.SECONDS)
+            if (!latch.await(3, TimeUnit.SECONDS)) return null
         } catch (_: InterruptedException) {
-            stopFlag.set(true)
+            return null
         }
         return value
     }
@@ -779,7 +743,6 @@ class AdClaimService : AccessibilityService() {
     companion object {
         const val PKG = "com.etalien.booster"
         val WATCH = 635 to 2156
-        val SKIP = 1132 to 254
         val DENY = 370 to 2519
         const val KWAI_WAIT_MS = 26_000L
         const val AD_CAP_MS = 70_000L
@@ -792,8 +755,6 @@ class AdClaimService : AccessibilityService() {
             "klevin", "unityads", "applovin", "gdtad", "qq.e", "reward",
             "advert", "interstitial", "splash"
         )
-        val READY = listOf("领取成功", "奖励已发放", "已获得")
-        val LEAVE = listOf("狠心离开", "残忍离开", "坚持退出", "确认退出")
         val COUNTDOWN = listOf(
             Regex("""(\d+)\s*s后可领取奖励"""),
             Regex("""奖励将于\s*(\d+)\s*秒后发放"""),
@@ -806,13 +767,15 @@ class AdClaimService : AccessibilityService() {
         @Volatile var instance: AdClaimService? = null
         @Volatile var logListener: ((String) -> Unit)? = null
         @Volatile var pendingRun = false
+        @Volatile var forceWatch = false
         val running = AtomicBoolean(false)
         private val logLock = Any()
 
         fun isEnabled() = instance != null
         fun isRunning() = running.get()
 
-        fun requestRun() {
+        fun requestRun(force: Boolean = false) {
+            if (force) forceWatch = true
             val svc = instance
             if (svc != null) svc.startLoopInternal()
             else pendingRun = true
