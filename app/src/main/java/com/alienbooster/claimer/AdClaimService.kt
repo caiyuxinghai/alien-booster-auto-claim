@@ -9,7 +9,10 @@ import android.content.ComponentName
 import android.content.Intent
 import android.graphics.Path
 import android.graphics.Rect
+import android.net.Uri
 import android.os.Build
+import android.os.Bundle
+import android.provider.Settings
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
@@ -89,7 +92,7 @@ class AdClaimService : AccessibilityService() {
     private fun runLoop() {
         runForce = forceWatch
         forceWatch = false
-        val rounds = if (runForce) 2 else MAX_ROUNDS
+        val rounds = if (runForce) 1 else MAX_ROUNDS
         val t0 = SystemClock.elapsedRealtime()
         var watched = 0
         var gainedMin = 0
@@ -102,7 +105,7 @@ class AdClaimService : AccessibilityService() {
                 log("未连接 Wi-Fi，按设置本次不启动")
                 holdForWifi = true
             } else {
-            if (runForce) log("测试：今日已看完，仍点按钮看 2 次")
+            if (runForce) log("测试：今日已看完，仍点按钮看 1 次")
             holdScreen()
             startInForeground()
             var netTries = 0
@@ -118,11 +121,14 @@ class AdClaimService : AccessibilityService() {
                     break
                 }
                 refreshFromRoot()
-                if (isAd() || looksLikeAd(collectTexts().first)) {
-                    log("[$i] orphan ad")
+                if (sessionOpen()) {
+                    log("[$i] session already open $curPkg/$curCls")
                     val beforeP = lastProgress
                     val wall = SystemClock.elapsedRealtime()
-                    watchAd(i)
+                    if (killBooster(i)) {
+                        bringFront()
+                        sleep(800)
+                    }
                     val delta = waitCredit(null, beforeP, wall)
                     if (delta >= MIN_REWARD_SEC) {
                         val mins = delta / 60
@@ -137,6 +143,10 @@ class AdClaimService : AccessibilityService() {
                     continue
                 }
                 if (!ensureMain()) {
+                    if (sessionOpen()) {
+                        log("[$i] ad in the way")
+                        continue
+                    }
                     log("[$i] cannot reach main, reset")
                     bringFront()
                     noOpen++
@@ -206,73 +216,546 @@ class AdClaimService : AccessibilityService() {
 
     private fun doTask(i: Int): TaskResult {
         if (quotaDone()) return TaskResult.QUOTA
-        if (!openAd(i)) {
-            log("[$i] task page not opened")
+        if (!armSession(i)) {
+            log("[$i] task page not opened focus=$curPkg/$curCls")
             return if (quotaDone()) TaskResult.QUOTA else TaskResult.NO_OPEN
         }
-        log("[$i] ad $curCls")
-        return watchAd(i)
+        log("[$i] session armed $curPkg/$curCls")
+        sleep(1200)
+        if (!killBooster(i)) return TaskResult.NO_OPEN
+        sleep(800)
+        denyJump()
+        return TaskResult.WATCHED
     }
 
-    /** Two taps, like the first version. Window-class only while waiting for the ad. */
-    private fun openAd(i: Int): Boolean {
+    /**
+     * A session is an ad activity. 「加载中」still sitting on MainActivity does not credit
+     * when the process is killed. 「广告加载失败，点击重试」does not either.
+     */
+    private fun armSession(i: Int): Boolean {
         for (attempt in 1..2) {
             if (!clickWatchButton()) {
                 log("[$i] 没有看广告按钮")
                 return false
             }
-            if (waitAdOpen(8_000)) return true
+            if (waitSession(24_000)) return true
             if (attempt == 1) {
-                log("[$i] no ad opened -> retap")
-                sleep(800)
+                log("[$i] session not armed focus=$curPkg/$curCls -> retap")
+                sleep(600)
             }
         }
-        return onAdScreen()
+        return false
+    }
+
+    private fun waitSession(timeoutMs: Long): Boolean {
+        val end = SystemClock.elapsedRealtime() + timeoutMs
+        while (SystemClock.elapsedRealtime() < end && !stopFlag.get()) {
+            refreshFromRoot()
+            if (denyJump()) {
+                sleep(400)
+                continue
+            }
+            if (sessionOpen()) return true
+            if (isHonorDialog()) tap(DENY.first, DENY.second)
+            sleep(300)
+        }
+        refreshFromRoot()
+        return sessionOpen()
     }
 
     /**
-     * Stay the seconds shown on the ad, without walking the node tree.
-     * Tree walks on the main looper deadlock a WebView ad; the first version just slept.
+     * Reward page only. The cj.mobile transparent shell is not a session:
+     * force-stopping it leaves the stage unchanged. BeiZi reward video and
+     * the octopus stopover dialog do credit.
      */
-    private fun watchAd(i: Int): TaskResult {
-        val openedAt = SystemClock.elapsedRealtime()
-        val kwai = isKwai()
-        val seconds = if (kwai) (KWAI_WAIT_MS / 1000).toInt() else readShownSeconds(openedAt)
-        val remain = (seconds ?: 15).coerceIn(5, 60)
-        // The number on screen is time still left, counted from the moment we read it.
-        val end = minOf(SystemClock.elapsedRealtime() + remain * 1000L, openedAt + AD_CAP_MS)
-        log(when {
-            kwai -> "[$i] stay ${remain}s kwai"
-            seconds != null -> "[$i] stay ${remain}s on ad"
-            else -> "[$i] stay ${remain}s (no timer text)"
-        })
-        while (SystemClock.elapsedRealtime() < end && !stopFlag.get()) {
-            if (isHonorDialog()) tap(DENY.first, DENY.second)
-            val left = end - SystemClock.elapsedRealtime()
-            if (left <= 0) break
-            sleep(minOf(500L, left))
+    private fun sessionOpen(): Boolean {
+        if (isHonorDialog()) return false
+        val cls = curCls.lowercase()
+        if (cls.contains("transparent")) return false
+        if (cls.contains("beizi") && !cls.contains("reward") && !cls.contains("video")) return false
+        if (rewardActivity()) return true
+        val texts = collectTexts().first
+        if (texts.isEmpty()) return false
+        val home = texts.any {
+            it.contains("阶段") || it.contains("领时长") || it.contains("可暂停") || it.contains("点击重试")
         }
-        val stayed = ((SystemClock.elapsedRealtime() - openedAt) / 1000).toInt()
-        if (creditedOnMain(lastProgress)) {
-            log("[$i] stayed ${stayed}s, back credited")
-        } else {
-            leaveAndReenter("[$i] stayed ${stayed}s, reopen")
-        }
-        return TaskResult.WATCHED
+        if (home || !boosterLeftMain()) return false
+        return looksLikeAd(texts) || texts.any { it.contains("加载中") || it.contains("请稍等") }
     }
 
-    private fun creditedOnMain(beforeP: String): Boolean {
-        bringFront()
-        val deadline = SystemClock.elapsedRealtime() + 2_500
-        while (SystemClock.elapsedRealtime() < deadline && !stopFlag.get()) {
-            if (isMain() && homeReady()) {
-                if (quotaDone()) return true
-                val nowP = progressToken()
-                if (beforeP.isNotEmpty() && nowP.isNotEmpty() && nowP != beforeP) return true
-            }
-            sleep(250)
+    private fun rewardActivity(): Boolean {
+        if (!(boosterLeftMain() || (!isMain() && isAd()))) return false
+        val cls = curCls.lowercase()
+        if (cls.contains("transparent")) return false
+        if (cls.contains("beizi")) return cls.contains("reward") || cls.contains("video")
+        return cls.contains("stopover") || cls.endsWith("adactivity")
+    }
+
+    private fun boosterLeftMain(): Boolean {
+        return curPkg == PKG && curCls.isNotEmpty() && !curCls.endsWith("MainActivity")
+    }
+
+    /**
+     * A normal app cannot force-stop another package. Shell is tried first;
+     * otherwise the system app-info page's 强行停止 is the same action adb uses.
+     */
+    private fun killBooster(i: Int): Boolean {
+        if (shellForceStop()) {
+            log("[$i] force-stop shell")
+            return true
         }
+        return settingsForceStop(i)
+    }
+
+    private fun shellForceStop(): Boolean {
+        return try {
+            val proc = Runtime.getRuntime().exec(arrayOf("am", "force-stop", PKG))
+            if (!proc.waitFor(2, TimeUnit.SECONDS)) {
+                proc.destroyForcibly()
+                return false
+            }
+            val err = proc.errorStream.bufferedReader().readText()
+            val out = proc.inputStream.bufferedReader().readText()
+            val blob = (err + out).lowercase()
+            if (proc.exitValue() != 0 || err.isNotBlank()) return false
+            if (blob.contains("exception") || blob.contains("permission") || blob.contains("security")) {
+                return false
+            }
+            sleep(800)
+            refreshFromRoot()
+            curPkg.isNotEmpty() && curPkg != PKG
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Honor keeps 强行停止 enabled only while the booster process is alive.
+     * A confirm tap is not success — success is that button going disabled.
+     */
+    private fun openAppInfo(): Boolean {
+        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+            data = Uri.parse("package:$PKG")
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        }
+        return try {
+            startActivity(intent)
+            true
+        } catch (e: Exception) {
+            log("open app info failed ${e.message}")
+            false
+        }
+    }
+
+    private fun settingsForceStop(i: Int): Boolean {
+        if (!openAppInfo()) return false
+        val deadline = SystemClock.elapsedRealtime() + 18_000
+        var swiped = false
+        var tappedStop = false
+        var broughtHome = false
+        while (SystemClock.elapsedRealtime() < deadline && !stopFlag.get()) {
+            if (confirmStopDialog()) {
+                log("[$i] force-stop confirm tapped")
+                sleep(700)
+                continue
+            }
+            val (texts, _) = collectTexts()
+            val blob = texts.joinToString("")
+            val onPage = blob.contains("外星仔") || blob.contains("加速") || blob.contains("etalien")
+            if (onPage && upperStopDisabled() && !cancelVisible()) {
+                log("[$i] force-stop dead")
+                sleep(700)
+                bringFront()
+                log("[$i] bringFront")
+                sleep(1500)
+                refreshFromRoot()
+                if (!isMain()) {
+                    if (tapExactOpen()) {
+                        log("[$i] opened from settings")
+                        sleep(1200)
+                    } else if (reopenFromLauncher(i)) {
+                        log("[$i] launcher reopen")
+                    } else {
+                        log("[$i] no open button")
+                    }
+                }
+                return true
+            }
+            if (!tappedStop && onPage && tapUpperStop()) {
+                tappedStop = true
+                log("[$i] force-stop tapped")
+                sleep(500)
+                continue
+            }
+            if (!onPage && (curPkg == PKG || boosterLeftMain() || isAd()) && !broughtHome &&
+                SystemClock.elapsedRealtime() > deadline - 14_000
+            ) {
+                broughtHome = true
+                log("[$i] settings covered -> home")
+                onMain { performGlobalAction(GLOBAL_ACTION_HOME) }
+                sleep(600)
+                openAppInfo()
+                continue
+            }
+            if (!swiped && !tappedStop && onPage && SystemClock.elapsedRealtime() > deadline - 4_000) {
+                swiped = true
+                swipeUp()
+            }
+            sleep(300)
+        }
+        log("[$i] force-stop not dead")
         return false
+    }
+
+    /**
+     * The confirm dialog's「强行停止」text is often not enabled; the clickable parent is.
+     * Only the upper app-info button (beside 卸载) going disabled means the process died.
+     */
+    private fun upperStopDisabled(): Boolean {
+        val hits = labeledNodes("强行停止", "强制停止", "结束运行").filter { it.second.centerY() < 1800 }
+        if (hits.isEmpty()) return false
+        return hits.none { nodeChainEnabled(it.first) }
+    }
+
+    private fun cancelVisible(): Boolean {
+        return labeledNodes("取消").any { (n, r) -> n.text?.toString() == "取消" && r.centerY() > 1800 }
+    }
+
+    /**
+     * Force-stop puts the booster in the stopped state. A background startActivity
+     * cannot clear it. The home-screen usage card is not the icon — it opens
+     * 健康使用手机. Search and then tap the app result, which is a real user launch.
+     */
+    private fun reopenFromLauncher(i: Int): Boolean {
+        if (openStoppedBooster()) {
+            log("[$i] launcher reopen")
+            return true
+        }
+        log("[$i] launcher icon missing")
+        return false
+    }
+
+    private fun openStoppedBooster(): Boolean {
+        if (tapRealIcon()) return true
+        if (tapSearchResult()) return true
+        if (!curPkg.contains("launcher") && findClass("EditText") == null) {
+            onMain { performGlobalAction(GLOBAL_ACTION_HOME) }
+            sleep(700)
+            refreshFromRoot()
+        }
+        if (tapRealIcon()) return true
+        return typeAndLaunch()
+    }
+
+    /** Icon cell on a home page. The usage-card line is only ~50px tall and is not an icon. */
+    private fun tapRealIcon(): Boolean {
+        val hit = labeledNodes("外星仔加速器").filter { (n, r) ->
+            val t = nodeLabel(n)
+            t.contains("外星仔加速器") && !t.contains("领时长") &&
+                r.height() > 80 && r.width() > 80 && r.centerY() > 400
+        }.minByOrNull { it.second.centerY() } ?: return false
+        tap(hit.second.centerX(), hit.second.centerY())
+        return true
+    }
+
+    private fun tapSearchResult(): Boolean {
+        val edit = windowEdit() ?: return false
+        val query = edit.first.text?.toString().orEmpty()
+        if (!query.contains("外星仔")) return false
+        val hit = windowNodes("外星仔加速器").filter { (n, _) ->
+            val cls = n.className?.toString().orEmpty()
+            val t = nodeLabel(n)
+            !cls.contains("EditText") && t.contains("外星仔加速器") && !t.contains("领时长")
+        }.minByOrNull { it.second.centerY() } ?: return false
+        val r = hit.second
+        log("search tap ${r.centerX()},${r.centerY()}")
+        clickNode(hit.first)
+        sleep(700)
+        refreshFromRoot()
+        if (!isMain()) {
+            val ok = tap(r.centerX(), r.centerY())
+            log("search gesture ${if (ok) "ok" else "cancelled"}")
+            sleep(500)
+            bringFront()
+        }
+        return true
+    }
+
+    private fun typeAndLaunch(): Boolean {
+        var edit = windowEdit()
+        if (edit == null) {
+            val chip = windowNodes("搜索").filter { (_, r) -> r.centerY() > 2100 && r.width() < 500 }
+                .minByOrNull { it.second.centerY() } ?: return false
+            tap(chip.second.centerX(), chip.second.centerY())
+            sleep(900)
+            edit = windowEdit() ?: return false
+        }
+        val (node, _) = edit
+        val args = Bundle()
+        args.putCharSequence(
+            AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+            "外星仔加速器"
+        )
+        if (!node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
+            log("search setText failed")
+            return false
+        }
+        sleep(1100)
+        if (tapSearchResult()) return true
+        log("search result not in tree")
+        val submit = labeledNodes("搜索").filter { (_, r) ->
+            r.centerY() in 1200..1900 && r.centerX() > 800
+        }.maxByOrNull { it.second.centerX() }
+        if (submit != null) {
+            tap(submit.second.centerX(), submit.second.centerY())
+            sleep(900)
+        }
+        return tapSearchResult()
+    }
+
+    private fun nodeLabel(n: AccessibilityNodeInfo): String {
+        return n.text?.toString().orEmpty().ifEmpty {
+            n.contentDescription?.toString().orEmpty()
+        }
+    }
+
+    private fun allRoots(): List<AccessibilityNodeInfo> {
+        val wins = try {
+            windows
+        } catch (_: Exception) {
+            null
+        }
+        val roots = wins?.mapNotNull { it.root }?.filter { !it.packageName.isNullOrEmpty() }.orEmpty()
+        if (roots.isNotEmpty()) return roots
+        val one = try {
+            rootInActiveWindow
+        } catch (_: Exception) {
+            null
+        }
+        return if (one != null) listOf(one) else emptyList()
+    }
+
+    private fun windowEdit(): Pair<AccessibilityNodeInfo, Rect>? {
+        for (root in allRoots()) {
+            val stack = ArrayDeque<AccessibilityNodeInfo>()
+            stack.add(root)
+            var n = 0
+            while (stack.isNotEmpty() && n < 2000) {
+                val node = stack.removeLast()
+                n++
+                if (node.className?.toString().orEmpty().contains("EditText")) {
+                    val r = Rect()
+                    node.getBoundsInScreen(r)
+                    if (onScreen(r)) return node to r
+                }
+                for (i in 0 until node.childCount) node.getChild(i)?.let { stack.add(it) }
+            }
+        }
+        return null
+    }
+
+    private fun windowNodes(vararg labels: String): List<Pair<AccessibilityNodeInfo, Rect>> {
+        val hits = ArrayList<Pair<AccessibilityNodeInfo, Rect>>()
+        for (root in allRoots()) {
+            val stack = ArrayDeque<AccessibilityNodeInfo>()
+            stack.add(root)
+            var n = 0
+            while (stack.isNotEmpty() && n < 2000) {
+                val node = stack.removeLast()
+                n++
+                val label = nodeLabel(node)
+                if (labels.any { label == it || label.contains(it) }) {
+                    val r = Rect()
+                    node.getBoundsInScreen(r)
+                    if (onScreen(r)) hits.add(node to r)
+                }
+                for (i in 0 until node.childCount) node.getChild(i)?.let { stack.add(it) }
+            }
+        }
+        return hits
+    }
+
+    private fun findClass(substr: String): Pair<AccessibilityNodeInfo, Rect>? {
+        val root = try {
+            rootInActiveWindow
+        } catch (_: Exception) {
+            null
+        } ?: return null
+        val stack = ArrayDeque<AccessibilityNodeInfo>()
+        stack.add(root)
+        var n = 0
+        while (stack.isNotEmpty() && n < 2000) {
+            val node = stack.removeLast()
+            n++
+            if (node.className?.toString().orEmpty().contains(substr)) {
+                val r = Rect()
+                node.getBoundsInScreen(r)
+                if (onScreen(r)) return node to r
+            }
+            for (i in 0 until node.childCount) node.getChild(i)?.let { stack.add(it) }
+        }
+        return null
+    }
+
+    /** Honor asks before an ad jumps to another app. 拒绝 sits on the same spot as 取消. */
+    private fun denyJump(): Boolean {
+        val nodes = labeledNodes("拒绝", "允许")
+        val deny = nodes.find { (n, _) -> n.text?.toString() == "拒绝" } ?: return false
+        if (nodes.none { (n, _) -> n.text?.toString() == "允许" }) return false
+        clickNode(deny.first)
+        return true
+    }
+
+    /** After force-stop, Settings' 打开 is allowed to launch the stopped app. Not 默认打开. */
+    private fun tapExactOpen(): Boolean {
+        val hit = labeledNodes("打开").filter { (n, r) ->
+            val t = n.text?.toString().orEmpty().ifEmpty {
+                n.contentDescription?.toString().orEmpty()
+            }
+            t == "打开" && r.centerY() < 1800
+        }.minByOrNull { it.second.centerY() } ?: return false
+        clickNode(hit.first)
+        return true
+    }
+
+    private fun tapUpperStop(): Boolean {
+        val hit = labeledNodes("强行停止", "强制停止", "结束运行")
+            .filter { it.second.centerY() < 1800 && nodeChainEnabled(it.first) }
+            .maxByOrNull { it.second.centerY() } ?: return false
+        clickNode(hit.first)
+        return true
+    }
+
+    /** Honor shows the confirm dialog a few seconds after 强行停止. Click the button on the same row as 取消. */
+    private fun confirmStopDialog(): Boolean {
+        val nodes = labeledNodes("取消", "确定", "确认", "强行停止", "强制停止")
+        val cancel = nodes.filter { (n, r) -> onScreen(r) && n.text?.toString() == "取消" }
+            .maxByOrNull { it.second.centerY() } ?: return false
+        val cancelBox = cancel.second
+        val ok = nodes.filter { (n, r) ->
+            val t = n.text?.toString().orEmpty()
+            onScreen(r) && r.centerX() > cancelBox.centerX() + 40 &&
+                kotlin.math.abs(r.centerY() - cancelBox.centerY()) < 160 &&
+                (t == "确定" || t == "确认" || t == "强行停止" || t == "强制停止")
+        }.maxByOrNull { it.second.centerX() } ?: return false
+        clickNode(ok.first)
+        return true
+    }
+
+    private fun clickNode(node: AccessibilityNodeInfo) {
+        var cur: AccessibilityNodeInfo? = node
+        var hops = 0
+        while (cur != null && hops < 5) {
+            if (cur.isClickable && cur.isEnabled) {
+                if (cur.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return
+            }
+            cur = cur.parent
+            hops++
+        }
+        val r = Rect()
+        node.getBoundsInScreen(r)
+        if (onScreen(r)) tap(r.centerX(), r.centerY())
+    }
+
+    private fun labeledNodes(vararg labels: String): List<Pair<AccessibilityNodeInfo, Rect>> {
+        val root = try {
+            rootInActiveWindow
+        } catch (_: Exception) {
+            null
+        } ?: return emptyList()
+        val hits = ArrayList<Pair<AccessibilityNodeInfo, Rect>>()
+        val stack = ArrayDeque<AccessibilityNodeInfo>()
+        stack.add(root)
+        var n = 0
+        while (stack.isNotEmpty() && n < 2000) {
+            val node = stack.removeLast()
+            n++
+            val label = node.text?.toString().orEmpty().ifEmpty {
+                node.contentDescription?.toString().orEmpty()
+            }
+            if (labels.any { label == it || label.contains(it) }) {
+                val r = Rect()
+                node.getBoundsInScreen(r)
+                if (onScreen(r)) hits.add(node to r)
+            }
+            for (i in 0 until node.childCount) node.getChild(i)?.let { stack.add(it) }
+        }
+        return hits
+    }
+
+    private fun tapEnabledLabel(vararg labels: String): Boolean {
+        val point = findEnabledLabel(*labels) ?: return false
+        tap(point.first, point.second)
+        return true
+    }
+
+    private fun findEnabledLabel(vararg labels: String): Pair<Int, Int>? {
+        val root = try {
+            rootInActiveWindow
+        } catch (_: Exception) {
+            null
+        } ?: return null
+        val stack = ArrayDeque<AccessibilityNodeInfo>()
+        stack.add(root)
+        var best: Pair<Int, Int>? = null
+        var bestY = -1
+        var n = 0
+        while (stack.isNotEmpty() && n < 400) {
+            val node = stack.removeLast()
+            n++
+            val label = node.text?.toString().orEmpty().ifEmpty {
+                node.contentDescription?.toString().orEmpty()
+            }
+            if (labels.any { label.contains(it) } && nodeChainEnabled(node)) {
+                val r = Rect()
+                node.getBoundsInScreen(r)
+                if (onScreen(r) && r.centerY() >= bestY) {
+                    best = r.centerX() to r.centerY()
+                    bestY = r.centerY()
+                }
+            }
+            for (i in 0 until node.childCount) node.getChild(i)?.let { stack.add(it) }
+        }
+        return best
+    }
+
+    private fun nodeChainEnabled(node: AccessibilityNodeInfo): Boolean {
+        var cur: AccessibilityNodeInfo? = node
+        var hops = 0
+        while (cur != null && hops < 4) {
+            if (!cur.isEnabled) return false
+            cur = cur.parent
+            hops++
+        }
+        return true
+    }
+
+    private fun swipeUp() {
+        val latch = CountDownLatch(1)
+        mainHandler.post {
+            try {
+                val path = Path().apply {
+                    moveTo(636f, 1900f)
+                    lineTo(636f, 900f)
+                }
+                val stroke = GestureDescription.StrokeDescription(path, 0, 280)
+                val sent = dispatchGesture(
+                    GestureDescription.Builder().addStroke(stroke).build(),
+                    object : GestureResultCallback() {
+                        override fun onCompleted(gestureDescription: GestureDescription?) = latch.countDown()
+                        override fun onCancelled(gestureDescription: GestureDescription?) = latch.countDown()
+                    },
+                    null
+                )
+                if (!sent) latch.countDown()
+            } catch (_: Exception) {
+                latch.countDown()
+            }
+        }
+        try {
+            latch.await(2, TimeUnit.SECONDS)
+        } catch (_: InterruptedException) {
+        }
     }
 
     private fun clickWatchButton(): Boolean {
@@ -282,45 +765,33 @@ class AdClaimService : AccessibilityService() {
         return true
     }
 
-    /** A few reads while the end card appears, then no further tree walks. */
-    private fun readShownSeconds(openedAt: Long): Int? {
-        for (at in longArrayOf(2_000L, 6_000L, 10_000L)) {
-            val pause = openedAt + at - SystemClock.elapsedRealtime()
-            if (pause > 0) sleep(pause)
-            if (isHonorDialog()) tap(DENY.first, DENY.second)
-            val seen = peekSeconds()
-            if (seen != null) return seen
-        }
-        return null
-    }
-
-    private fun peekSeconds(): Int? {
-        val texts = collectTexts().first
-        return experienceSeconds(texts) ?: readCountdown(texts)
-    }
-
-    private fun leaveAndReenter(reason: String) {
-        onMain { performGlobalAction(GLOBAL_ACTION_HOME) }
-        sleep(350)
-        bringFront()
-        val deadline = SystemClock.elapsedRealtime() + 2_500
-        while (SystemClock.elapsedRealtime() < deadline && !stopFlag.get()) {
-            refreshFromRoot()
-            if (isMain() && homeReady()) break
-            sleep(200)
-        }
-        if (!isMain()) bringFront()
-        log(reason)
-    }
-
     private fun waitCredit(before: Int?, beforeP: String, wallStart: Long): Int {
-        val deadline = SystemClock.elapsedRealtime() + 5_000
+        val deadline = SystemClock.elapsedRealtime() + 18_000
         var best = 0
+        var sawMain = false
         while (SystemClock.elapsedRealtime() < deadline && !stopFlag.get()) {
-            if (!isMain()) {
-                if (isAd()) sleep(1000) else bringFront()
-                sleep(500)
+            if (denyJump()) {
+                sleep(700)
                 continue
+            }
+            if (!isMain()) {
+                when {
+                    isAd() -> sleep(1000)
+                    curPkg.contains("settings") -> {
+                        back()
+                        sleep(400)
+                    }
+                    else -> {
+                        if (!openStoppedBooster()) bringFront()
+                        sleep(800)
+                    }
+                }
+                sleep(400)
+                continue
+            }
+            if (!sawMain) {
+                log("back on main")
+                sawMain = true
             }
             val nowC = readCounterSeconds()
             val nowP = progressToken()
@@ -342,6 +813,7 @@ class AdClaimService : AccessibilityService() {
         val end = SystemClock.elapsedRealtime() + budgetMs
         var backs = 0
         var logged = ""
+        var searchTried = false
         while (SystemClock.elapsedRealtime() < end && !stopFlag.get()) {
             val focus = "$curPkg/$curCls"
             if (focus != logged) {
@@ -349,12 +821,30 @@ class AdClaimService : AccessibilityService() {
                 logged = focus
             }
             when {
-                isAd() -> {
-                    sleep(1500)
-                    if (isAd()) closeAd("orphan ad")
-                }
+                sessionOpen() -> return false
                 isHonorDialog() -> {
                     tap(DENY.first, DENY.second)
+                    sleep(600)
+                }
+                curPkg.contains("settings") -> {
+                    backs++
+                    back()
+                    sleep(450)
+                    if (backs >= 3) {
+                        bringFront()
+                        backs = 0
+                    }
+                }
+                denyJump() -> sleep(400)
+                curPkg.contains("launcher") || curPkg.contains("hihonor.search") -> {
+                    bringFront()
+                    log("bringFront")
+                    sleep(1500)
+                    refreshFromRoot()
+                    if (!(isMain() && homeReady()) && !searchTried) {
+                        searchTried = true
+                        openStoppedBooster()
+                    }
                     sleep(600)
                 }
                 isMain() && homeReady() -> return true
@@ -378,40 +868,10 @@ class AdClaimService : AccessibilityService() {
         return isMain() && homeReady()
     }
 
-    private fun waitAdOpen(timeoutMs: Long): Boolean {
-        val end = SystemClock.elapsedRealtime() + timeoutMs
-        while (SystemClock.elapsedRealtime() < end && !stopFlag.get()) {
-            if (onAdScreen()) return true
-            if (isHonorDialog()) tap(DENY.first, DENY.second)
-            sleep(200)
-        }
-        if (onAdScreen()) return true
-        return looksLikeAd(collectTexts().first)
-    }
-
     private fun looksLikeAd(texts: List<String>): Boolean {
         val blob = texts.joinToString("")
         return blob.contains("跳过") || blob.contains("立即前往") || blob.contains("可立即领奖") ||
             blob.contains("领取奖励") || blob.contains("去体验") || blob.contains("去看")
-    }
-
-    private fun onAdScreen(): Boolean {
-        if (isHonorDialog()) return false
-        if (isAd()) return true
-        if (curPkg == PKG && curCls.isNotEmpty() && !curCls.endsWith("MainActivity")) return true
-        return curPkg.isNotEmpty() && curPkg != PKG && curPkg != packageName && !isLauncher(curPkg)
-    }
-
-    private fun closeAd(reason: String) {
-        bringFront()
-        sleep(1000)
-        if (isAd() || (curPkg.isNotEmpty() && curPkg != PKG && curPkg != packageName && !isLauncher(curPkg))) {
-            onMain { performGlobalAction(GLOBAL_ACTION_HOME) }
-            sleep(400)
-            bringFront()
-            sleep(1000)
-        }
-        log(reason)
     }
 
     private fun homeReady(): Boolean {
@@ -423,12 +883,10 @@ class AdClaimService : AccessibilityService() {
     private fun quotaDone(): Boolean {
         if (runForce) return false
         val texts = collectTexts().first
-        return texts.any { QUOTA.containsMatchIn(it) }
-    }
-
-    private fun isKwai(): Boolean {
-        val s = "$curPkg|$curCls".lowercase()
-        return s.contains("kwad") || s.contains("ksad")
+        if (texts.any { QUOTA.containsMatchIn(it) }) return true
+        val done = texts.count { it == "已完成" }
+        val stillOpen = texts.any { it == "待解锁" || RATIO.containsMatchIn(it) }
+        return done >= 3 && !stillOpen
     }
 
     private fun findWatchPoint(): Pair<Int, Int>? {
@@ -460,31 +918,6 @@ class AdClaimService : AccessibilityService() {
         val min = m.groupValues[2].toIntOrNull() ?: return null
         val sec = m.groupValues.getOrNull(3)?.toIntOrNull() ?: 0
         return h * 3600 + min * 60 + sec
-    }
-
-    private fun experienceSeconds(texts: List<String>): Int? {
-        val blob = texts.joinToString("")
-        val patterns = listOf(
-            Regex("""体验\s*(\d+)\s*秒"""),
-            Regex("""浏览\s*(\d+)\s*秒"""),
-            Regex("""去看\s*(\d+)\s*秒"""),
-            Regex("""(\d+)\s*秒可立即领奖"""),
-            Regex("""(\d+)\s*秒可直接"""),
-        )
-        for (re in patterns) {
-            val n = re.find(blob)?.groupValues?.getOrNull(1)?.toIntOrNull()
-            if (n != null && n in 3..60) return n
-        }
-        return null
-    }
-
-    private fun readCountdown(texts: List<String>): Int? {
-        val blob = texts.joinToString("")
-        for (re in COUNTDOWN) {
-            val n = re.find(blob)?.groupValues?.getOrNull(1)?.toIntOrNull()
-            if (n != null && n in 3..60) return n
-        }
-        return null
     }
 
     private fun isMain(): Boolean {
@@ -547,17 +980,24 @@ class AdClaimService : AccessibilityService() {
         return texts to bounds
     }
 
-    private fun tap(x: Int, y: Int) {
-        if (x < 0 || y < 0) return
+    private fun tap(x: Int, y: Int): Boolean {
+        if (x < 0 || y < 0) return false
         val latch = CountDownLatch(1)
+        val ok = AtomicBoolean(false)
         mainHandler.post {
             try {
-                val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
-                val stroke = GestureDescription.StrokeDescription(path, 0, 70)
+                val path = Path().apply {
+                    moveTo(x.toFloat(), y.toFloat())
+                    lineTo(x + 1f, y + 1f)
+                }
+                val stroke = GestureDescription.StrokeDescription(path, 0, 120)
                 val sent = dispatchGesture(
                     GestureDescription.Builder().addStroke(stroke).build(),
                     object : GestureResultCallback() {
-                        override fun onCompleted(gestureDescription: GestureDescription?) = latch.countDown()
+                        override fun onCompleted(gestureDescription: GestureDescription?) {
+                            ok.set(true)
+                            latch.countDown()
+                        }
                         override fun onCancelled(gestureDescription: GestureDescription?) = latch.countDown()
                     },
                     null
@@ -571,6 +1011,7 @@ class AdClaimService : AccessibilityService() {
             latch.await(2, TimeUnit.SECONDS)
         } catch (_: InterruptedException) {
         }
+        return ok.get()
     }
 
     private fun back() {
@@ -579,12 +1020,13 @@ class AdClaimService : AccessibilityService() {
 
     private fun bringFront() {
         try {
-            val launch = packageManager.getLaunchIntentForPackage(PKG)
-            val intent = (launch ?: Intent()).apply {
-                if (launch == null) {
-                    component = ComponentName(PKG, "com.etalien.booster.ui.MainActivity")
-                }
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+            val intent = Intent().apply {
+                component = ComponentName(PKG, "com.etalien.booster.ui.MainActivity")
+                addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP
+                )
             }
             startActivity(intent)
         } catch (e: Exception) {
@@ -744,8 +1186,6 @@ class AdClaimService : AccessibilityService() {
         const val PKG = "com.etalien.booster"
         val WATCH = 635 to 2156
         val DENY = 370 to 2519
-        const val KWAI_WAIT_MS = 26_000L
-        const val AD_CAP_MS = 70_000L
         const val MAX_ROUNDS = 24
         const val MAX_NOOPEN = 5
         const val MIN_REWARD_SEC = 8 * 60
@@ -753,12 +1193,7 @@ class AdClaimService : AccessibilityService() {
         val AD_HINTS = listOf(
             "kwad", "byazt", "ksad", "pangle", "topon", "mintegral", "sigmob",
             "klevin", "unityads", "applovin", "gdtad", "qq.e", "reward",
-            "advert", "interstitial", "splash"
-        )
-        val COUNTDOWN = listOf(
-            Regex("""(\d+)\s*s后可领取奖励"""),
-            Regex("""奖励将于\s*(\d+)\s*秒后发放"""),
-            Regex("""(\d+)\s*秒后可领"""),
+            "advert", "interstitial", "splash", "beizi"
         )
         val QUOTA = Regex("今日已领完|明日再来|已领完|全部领取|已到上限|今日广告已看完")
         val COUNTER = Regex("""(\d+)\s*时\s*(\d+)\s*分(?:\s*(\d+)\s*秒)?""")
