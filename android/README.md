@@ -33,6 +33,8 @@ Shizuku SDK 通过 MavenCentral 依赖（`dev.rikka.shizuku:api` / `:provider` 1
 
 ## 安装与授权
 
+可直接下载 [Release v0.8.0](https://github.com/caiyuxinghai/alien-booster-auto-claim/releases/tag/v0.8.0) 中的 APK（debug 签名），或按上文从源码构建。
+
 参考 `deploy.sh.example`：
 
 ```bash
