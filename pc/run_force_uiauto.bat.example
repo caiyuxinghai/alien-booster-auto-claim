@@ -1,0 +1,39 @@
+@echo off
+REM ==========================================================================
+REM run_force_uiauto.bat - force the uiautomator backend
+REM
+REM Why this exists: on HONOR/Honor WIN phones a flaky USB moment can make the
+REM uiautomator probe dump return empty, so --backend auto falls back to
+REM mobilecli. On Honor ROMs mobilecli reads NO CTA at all and the run dies
+REM with slot-1 NO CTA (exit 3). If v3_run.log shows "backend=mobilecli"
+REM followed by immediate NO CTA on an Honor phone, use this template.
+REM
+REM Setup:
+REM   1. copy this file to run_force_uiauto.bat
+REM   2. set SERIAL to your adb device serial
+REM   3. fix the PYTHON path (any Python 3.8+ works; the engine is stdlib-only)
+REM ==========================================================================
+setlocal enableextensions
+set ADB_LIBUSB=1
+set DIR=%~dp0
+set SCRIPT=%DIR%watch_ads_v3.py
+set LOG=%DIR%v3_run.log
+
+set SERIAL=YOUR_DEVICE_SERIAL
+set CLONE_USER=128
+set PYTHON=python
+
+echo ===== %DATE% %TIME% (uiauto forced) =====>>"%LOG%"
+"%PYTHON%" -u "%SCRIPT%" --serial %SERIAL% --user 0 --backend uiauto >>"%LOG%" 2>&1
+echo MAIN EXIT %ERRORLEVEL% %TIME%>>"%LOG%"
+
+set HASCLONE=
+for /f "delims=" %%p in ('adb -s %SERIAL% shell pm list packages --user %CLONE_USER% com.etalien.booster 2^>nul') do set HASCLONE=1
+if defined HASCLONE (
+  echo --- clone user %CLONE_USER% start --->>"%LOG%"
+  "%PYTHON%" -u "%SCRIPT%" --serial %SERIAL% --user %CLONE_USER% --backend uiauto >>"%LOG%" 2>&1
+  echo CLONE EXIT %ERRORLEVEL% %TIME%>>"%LOG%"
+) else (
+  echo no clone booster installed, skip>>"%LOG%"
+)
+endlocal

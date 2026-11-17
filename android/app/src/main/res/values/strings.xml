@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">外星仔领时长</string>
+    <string name="title">外星仔领时长</string>
+    <string name="start">开始</string>
+    <string name="stop">停止</string>
+    <string name="today_progress">今日进度</string>
+    <string name="stage1">阶段一</string>
+    <string name="stage2">阶段二</string>
+    <string name="stage3">加油包</string>
+    <string name="expected">预计入账</string>
+    <string name="minutes">%1$d 分钟</string>
+    <string name="idle_phase">空闲 · 今日未完成</string>
+    <string name="running_phase">运行中 · 第 %1$d 条</string>
+    <string name="done_phase">已完成</string>
+    <string name="recent_log">最近日志</string>
+    <string name="settings">设置</string>
+    <string name="schedule">定时启动</string>
+    <string name="schedule_hint">关闭后，到点不会自己跑</string>
+    <string name="every_day">每天 %1$02d:%2$02d</string>
+    <string name="auto_dual">自动双账号</string>
+    <string name="auto_dual_hint">主号完成后继续分身（user 128）</string>
+    <string name="shizuku_row">Shizuku 状态</string>
+    <string name="grant">授权</string>
+    <string name="open_shizuku">打开 Shizuku</string>
+    <string name="pin_label">解锁 PIN</string>
+    <string name="pin_hint">锁屏密码，留空则只上滑</string>
+    <string name="test_mode">测试模式（只跑 1 条）</string>
+    <string name="test_mode_hint">不写今日完成标记</string>
+    <string name="selftest">自检</string>
+    <string name="export_log">导出日志</string>
+    <string name="battery">电池优化</string>
+    <string name="footer">v0.8.0 · 仅供本人设备使用</string>
+    <string name="shizuku_on">Shizuku 已连接</string>
+    <string name="shizuku_off">Shizuku 未连接</string>
+    <string name="shizuku_denied">Shizuku 未授权</string>
+    <string name="running_chip">运行中</string>
+    <string name="channel_name">领时长</string>
+    <string name="reboot_notice">手机重启后请打开 Shizuku 并启动服务</string>
+    <string name="unlock_failed">无法解锁（PIN 错误或安全锁）</string>
+</resources>

@@ -1,3 +1,4 @@
+# Android / Gradle
 .gradle/
 **/build/
 local.properties
@@ -6,3 +7,21 @@ local.properties
 captures/
 *.apk
 .DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# PC engine runtime artifacts
+pc/*.log
+pc/claimed_*.flag
+pc/claimed_*.flag.partial-*
+pc/run_*.lock
+pc/stats_*.jsonl
+pc/batch_*.txt
+pc/mobilecli*.exe
+pc/mobilecli*.dex
+
+# local copies made from *.example templates
+deploy.sh
+run_force_uiauto.bat

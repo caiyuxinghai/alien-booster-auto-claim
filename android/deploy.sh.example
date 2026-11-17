@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# deploy.sh.example - build, install and smoke-test the claimer app.
+#
+# Usage:
+#   cp deploy.sh.example deploy.sh   # then edit SERIAL below
+#   ./deploy.sh
+#
+# Shizuku must already be running on the phone (start it with adb each reboot:
+#   adb shell sh /storage/emulated/0/Android/data/moe.shizuku.privileged.api/start.sh
+# or launch libshizuku.so from the installed APK path).
+set -u
+SERIAL="${SERIAL:-YOUR_DEVICE_SERIAL}"
+CLONE_USER="${CLONE_USER:-128}"   # Honor twin-app user id; use "none" to skip
+PROJ="$(cd "$(dirname "$0")" && pwd)"
+APK="$PROJ/app/build/outputs/apk/debug/app-debug.apk"
+export ADB_LIBUSB=1
+export MSYS_NO_PATHCONV=1
+ADB="adb -s $SERIAL"
+
+echo "== 0. check device =="
+$ADB get-state || { echo DEVICE OFFLINE; exit 9; }
+
+echo "== 1. build =="
+( cd "$PROJ" && gradle :app:assembleDebug --console=plain ) || exit 1
+
+echo "== 2. install =="
+$ADB install -r "$APK"
+
+echo "== 3. grants =="
+$ADB shell pm grant com.alienbooster.claimer moe.shizuku.manager.permission.API_V23
+$ADB shell pm grant com.alienbooster.claimer android.permission.POST_NOTIFICATIONS
+$ADB shell dumpsys deviceidle whitelist +com.alienbooster.claimer
+
+echo "== 4. launch =="
+$ADB shell monkey -p com.alienbooster.claimer -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
+
+echo "== 5. selftest (read-only, zero ad consumption) =="
+$ADB shell am start -n com.alienbooster.claimer/.MainActivity --ez selftest true --ei user 0
+sleep 6
+$ADB shell "run-as com.alienbooster.claimer tail -40 files/run.log"
+
+echo "== done. Authorize Shizuku in the app (always allow), then start a real run. =="
