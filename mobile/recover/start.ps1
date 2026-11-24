@@ -108,8 +108,8 @@ try {
     $model = (Invoke-DeviceAdb @('shell','getprop','ro.product.model') | Out-String).Trim()
     if ($model -notmatch '^AAP[-_]AN00$') { throw ('连接设备型号为 ' + $model + '。这个恢复包只用于荣耀 WIN Y。') }
     $package = Invoke-DeviceAdb @('shell','dumpsys','package',$pkg)
-    if (-not ($package | Where-Object { $_ -match '^\s*versionName=0\.12\.1\s*$' })) {
-        throw '手机需要先安装「外星仔领时长」0.12.1。'
+    if (-not ($package | Where-Object { $_ -match '^\s*versionName=0\.12\.2\s*$' })) {
+        throw '手机需要先安装「外星仔领时长」0.12.2。'
     }
     foreach ($name in @('dual-helper.jar','market_lease.sh','supervise.sh')) {
         if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $name) -PathType Leaf)) {
@@ -190,7 +190,7 @@ replace_idle() {
     if (found) { if (state == "") exit 1; print state }
   }' daemon.log) || { echo FAIL_HELPER_STATE_UNKNOWN; exit 1; }
   case "$last" in
-    RUNNING|WAITING|RECOVERING) echo FAIL_HELPER_ACTIVE; exit 1;;
+    RUNNING|WAITING|RECOVERING|RESTARTING) echo FAIL_HELPER_ACTIVE; exit 1;;
     ''|IDLE|DONE|STOPPED|ERROR|RECOVERED|RECOVERY_FAILED) ;;
     *) echo FAIL_HELPER_STATE_UNKNOWN; exit 1;;
   esac

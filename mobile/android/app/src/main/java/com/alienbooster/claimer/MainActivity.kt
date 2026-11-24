@@ -9,6 +9,7 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.text.format.DateFormat
 import android.view.Gravity
 import android.view.View
@@ -26,6 +27,7 @@ import java.util.concurrent.Executors
 class MainActivity : Activity() {
     private enum class Tab(val label: String) { CLAIM("领取"), SETTINGS("设置"), HISTORY("记录") }
     private enum class Scope(val label: String) { DUAL("双号"), ALL("全部账号"), CONTINUOUS("持续观看"), SOLO("仅主号") }
+    private data class RestartPending(val oldInstance: String, val acknowledged: Boolean, val deadline: Long)
 
     private val bg = Color.rgb(14, 22, 28)
     private val panel = Color.rgb(27, 39, 48)
@@ -63,9 +65,13 @@ class MainActivity : Activity() {
     private lateinit var scheduleStatus: TextView
     private lateinit var restoreIcons: Button
     private lateinit var restoreStatus: TextView
+    private lateinit var restartAssistant: Button
+    private lateinit var restartStatus: TextView
     private var snapshot: BackgroundClient.Status? = null
-    private val restoringIcons get() = snapshot?.state == BackgroundClient.State.RECOVERING
+    private val restoringIcons get() = helperError == null && snapshot?.state == BackgroundClient.State.RECOVERING
     private var restoreFeedback: String? = null
+    private var restartFeedback: String? = null
+    private var pendingRestart: RestartPending? = null
     private var helperError: String? = null
     private var polling = false
     private var commanding = false
@@ -86,6 +92,7 @@ class MainActivity : Activity() {
                     polling = false
                     applyResult(result)
                     if (result is BackgroundClient.Result.Ready && !commanding && !syncingPolicy &&
+                        pendingRestart == null &&
                         lastAppliedPolicy != RunPrefs.allowMobile(this@MainActivity)) syncPolicy(false)
                 }
             }
@@ -236,11 +243,21 @@ class MainActivity : Activity() {
         maintenance.addView(label("按保护记录恢复商店显示，图标位置由荣耀桌面安排。", 13, muted), row(top = 8))
         restoreStatus = label("", 13, muted)
         maintenance.addView(restoreStatus, row(top = 8))
+        restartAssistant = button("重启助手", inactive, ink).apply {
+            setOnClickListener { restartAssistant() }
+        }
+        maintenance.addView(restartAssistant, row(height = 48, top = 8))
+        maintenance.addView(label(
+            "助手离线时，用已授权的 USB 或无线调试连接电脑，双击恢复包里的「启动后台助手.bat」。",
+            13, muted
+        ), row(top = 8))
+        restartStatus = label("", 13, muted)
+        maintenance.addView(restartStatus, row(top = 8))
         body.addView(maintenance, row(top = 12))
     }
 
     private fun restoreStoreIcons() {
-        if (commanding || restoringIcons) return
+        if (commanding || restoringIcons || pendingRestart != null) return
         if (maybeActive) {
             restoreFeedback = "请先暂停领取，等任务收尾后再恢复图标"
             render()
@@ -267,6 +284,60 @@ class MainActivity : Activity() {
         else render()
     }
 
+    private fun restartAssistant() {
+        if (commanding || pendingRestart != null) return
+        commanding = true
+        restartFeedback = "正在连接后台助手…"
+        render()
+        client.request(BackgroundClient.Command.STATUS) { preflight ->
+            if (isDestroyed) return@request
+            when (preflight) {
+                is BackgroundClient.Result.Ready -> {
+                    client.request(BackgroundClient.Command.RESTART_HELPER) { result ->
+                        if (!isDestroyed) finishRestartRequest(preflight.status.instanceId, result)
+                    }
+                }
+                is BackgroundClient.Result.Failed -> {
+                    commanding = false
+                    restartFeedback = preflight.message
+                    applyResult(preflight)
+                }
+            }
+        }
+    }
+
+    private fun finishRestartRequest(oldInstance: String, result: BackgroundClient.Result) {
+        commanding = false
+        val reply = (result as? BackgroundClient.Result.Ready)?.status
+        val failure = result as? BackgroundClient.Result.Failed
+        val accepted = reply?.state == BackgroundClient.State.RESTARTING
+        if (accepted || failure?.commandMayHaveRun == true) {
+            pendingRestart = RestartPending(reply?.instanceId ?: oldInstance, accepted,
+                SystemClock.elapsedRealtime() + RESTART_TIMEOUT_MS)
+            restartFeedback = "正在等待后台助手重新连接…"
+        } else {
+            restartFeedback = failure?.message ?: "后台助手未确认重启"
+        }
+        if (reply != null) applyResult(result) else render()
+    }
+
+    private fun verifyRestart(result: BackgroundClient.Result) {
+        val pending = pendingRestart ?: return
+        val status = (result as? BackgroundClient.Result.Ready)?.status
+        if (status != null && status.instanceId != pending.oldInstance &&
+            status.state != BackgroundClient.State.RESTARTING) {
+            pendingRestart = null
+            restartFeedback = when {
+                !pending.acknowledged -> "已连接新的后台助手，重启请求未确认"
+                status.state == BackgroundClient.State.IDLE -> "后台助手已重启并就绪"
+                else -> "后台助手已重启 · " + status.message
+            }
+        } else if (SystemClock.elapsedRealtime() >= pending.deadline) {
+            pendingRestart = null
+            restartFeedback = "未能确认助手重启。若收不到状态，请使用恢复包启动助手。"
+        }
+    }
+
     private fun refreshSchedule() {
         runCatching { RunSchedule.refresh(this) }.onFailure { toast("定时设置已保存，系统暂未完成排程") }
     }
@@ -282,12 +353,15 @@ class MainActivity : Activity() {
                 if (last.isEmpty()) "" else " · $last"
             else -> "等待系统排程"
         })
-        restoreIcons.isEnabled = !commanding && !restoringIcons
+        restoreIcons.isEnabled = !commanding && !restoringIcons && pendingRestart == null
+        restartAssistant.isEnabled = !commanding && pendingRestart == null
         val result = snapshot?.takeIf { it.state in restoreStates }
         val message = restoreFeedback ?: result?.message.orEmpty()
         restoreStatus.showText(message)
         restoreStatus.visibility = if (message.isEmpty()) View.GONE else View.VISIBLE
         restoreStatus.setTextColor(if (result?.state == BackgroundClient.State.RECOVERY_FAILED) warn else muted)
+        restartStatus.showText(restartFeedback.orEmpty())
+        restartStatus.visibility = if (restartFeedback == null) View.GONE else View.VISIBLE
     }
 
     private fun buildHistory(body: LinearLayout) {
@@ -395,6 +469,7 @@ class MainActivity : Activity() {
     private fun startSelected() {
         feedback = null
         if (commanding) { toast("正在处理，请稍候"); return }
+        if (pendingRestart != null) { toast("正在等待后台助手重新连接"); return }
         if (restoringIcons) { toast("正在恢复商店图标，请稍候"); return }
         if (maybeActive) {
             feedback = "正在运行" + activeMode.label + "，切换前请先暂停。"
@@ -437,7 +512,7 @@ class MainActivity : Activity() {
     }
 
     private fun syncPolicy(manual: Boolean) {
-        if (commanding || syncingPolicy) return
+        if (commanding || syncingPolicy || pendingRestart != null) return
         syncingPolicy = true
         val allow = RunPrefs.allowMobile(this)
         val revision = ++policyRevision
@@ -474,6 +549,7 @@ class MainActivity : Activity() {
             }
             is BackgroundClient.Result.Failed -> helperError = result.message
         }
+        verifyRestart(result)
         render()
     }
 
@@ -494,6 +570,7 @@ class MainActivity : Activity() {
         })
         start.showText(when {
             restoringIcons -> "正在恢复图标"
+            pendingRestart != null -> "正在重启助手"
             maybeActive -> "任务运行中"
             else -> "开始 / 继续"
         })
@@ -503,6 +580,7 @@ class MainActivity : Activity() {
         val selected = selectedLabel()
         statusTitle.showText(when {
             commanding -> "正在处理…"
+            pendingRestart != null -> "正在重连"
             maybeActive && status?.state == BackgroundClient.State.WAITING -> "等待中 · " + activeMode.label
             maybeActive -> "正在运行 · " + activeMode.label
             else -> "当前选择 · $selected"
@@ -516,6 +594,7 @@ class MainActivity : Activity() {
         progress.visibility = if (progress.text.isEmpty()) View.GONE else View.VISIBLE
         statusText.showText(feedback ?: when {
             commanding -> "正在向手机助手发送请求"
+            pendingRestart != null -> "正在等待后台助手重新连接…"
             helperError != null -> helperError!!
             !maybeActive && status != null && status.state in setOf(BackgroundClient.State.DONE, BackgroundClient.State.ERROR, BackgroundClient.State.STOPPED) ->
                 "上次 · " + status.mode.label + " · " + status.message
@@ -572,6 +651,7 @@ class MainActivity : Activity() {
     }
 
     private companion object {
+        const val RESTART_TIMEOUT_MS = 30_000L
         val restoreStates = setOf(BackgroundClient.State.RECOVERING, BackgroundClient.State.RECOVERED,
             BackgroundClient.State.RECOVERY_FAILED)
     }

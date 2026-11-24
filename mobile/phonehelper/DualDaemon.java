@@ -11,6 +11,7 @@ import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.Process;
 import android.os.SystemClock;
+import android.system.Os;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
@@ -47,13 +48,16 @@ public final class DualDaemon {
     private static final File DIRECTORY = new File("/data/local/tmp/codex-dual");
     private static final String MARKET = new File(DIRECTORY, "market_lease.sh").getPath();
     private static final int PORT = 34783;
-    private static final String STATUS_PROTOCOL = "[0.12.1] ";
+    // The supervisor distinguishes an acknowledged restart from a crash.
+    private static final int RESTART_EXIT = 75;
+    private static final String STATUS_PROTOCOL = "[0.12.2] ";
     private static final String TARGET = "com.etalien.booster";
     private static final String[] STORES = {"com.hihonor.appmarket", "com.android.vending", "com.hihonor.gamecenter"};
     private static final Pattern INSTALL_PRIVILEGE = Pattern.compile(
         "android\\.permission\\.(?:INSTALL_PACKAGES|INSTALL_SELF_UPDATES|INSTALL_PACKAGE_UPDATES)" +
         ":\\s*granted=true\\b");
     private static final SecureRandom RANDOM = new SecureRandom();
+    private static final String INSTANCE_ID = UUID.randomUUID().toString().replace("-", "");
     private static final Pattern INSTALL_SESSION = Pattern.compile("createdMillis=(\\d{13})");
     private static final Pattern PROFILE_ROW = Pattern.compile("(?m)^\\s*UserInfo\\{(\\d+):");
     private static final Pattern MAIN_FOCUS = Pattern.compile(
@@ -79,6 +83,7 @@ public final class DualDaemon {
     private static volatile Map<Integer, Integer> progress = Collections.emptyMap();
     private static Mode mode = Mode.BACKGROUND;
     private static Thread worker;
+    private static boolean restartRequested;
 
     private enum Mode {
         BACKGROUND("START", "", false, false, false),
@@ -130,7 +135,7 @@ public final class DualDaemon {
                 update("ERROR", "之前的商店保护恢复未确认，暂不运行");
             }
             System.out.println("DUAL_DAEMON_READY");
-            for (;;) {
+            while (!restartRequested) {
                 try (Socket socket = server.accept()) {
                     handle(socket, token);
                 } catch (IOException ignored) {
@@ -141,6 +146,7 @@ public final class DualDaemon {
                 }
             }
         }
+        System.exit(RESTART_EXIT);
     }
 
     private static void handle(Socket socket, byte[] token) throws IOException {
@@ -156,7 +162,7 @@ public final class DualDaemon {
         Mode requested = command.length == 3 ? Mode.fromCommand(command[1]) : null;
         if (command.length != 3 || !"CMD".equals(command[0]) ||
             (requested == null && !command[1].matches(
-                "STATUS|STOP|NET_WIFI_ONLY|NET_ALLOW_MOBILE|SCHEDULE_ALL_BACKGROUND|RECOVER_STORES")
+                "STATUS|STOP|NET_WIFI_ONLY|NET_ALLOW_MOBILE|SCHEDULE_ALL_BACKGROUND|RECOVER_STORES|RESTART_HELPER")
                 && !TaskHistory.supports(command[1])) ||
             !MessageDigest.isEqual(mac(token, "cmd\t" + nonces + "\t" + command[1])
                 .getBytes(StandardCharsets.US_ASCII), command[2].getBytes(StandardCharsets.US_ASCII))) return;
@@ -173,6 +179,18 @@ public final class DualDaemon {
         synchronized (DualDaemon.class) {
             String action = command[1];
             boolean busy = worker != null && worker.isAlive();
+            if ("RESTART_HELPER".equals(action)) {
+                String error = null;
+                if (busy || hasUnfinishedMarketCleanup()) error = "RESTART_BUSY";
+                else if (!hasLiveSupervisor()) error = "RESTART_UNAVAILABLE";
+                if (error != null) {
+                    reply = "ERR\t" + error;
+                    writeLine(socket, reply + "\t" + mac(token, "result\t" + nonces + "\t" + reply));
+                    return;
+                }
+                update("RESTARTING", "正在重启后台助手");
+                restartRequested = true;
+            }
             if (busy && ("RECOVER_STORES".equals(action) || "SCHEDULE_ALL_BACKGROUND".equals(action)
                 || (requested != null && "RECOVERING".equals(state)))) {
                 reply = "ERR\t" + ("RECOVER_STORES".equals(action) ? "RECOVER_BUSY" : "BUSY");
@@ -197,9 +215,33 @@ public final class DualDaemon {
                 synchronized (WAIT) { WAIT.notifyAll(); }
                 update("RUNNING", "正在暂停并收尾");
             }
-            reply = "OK\t" + state + "\t" + owner + "\t" + clone + "\t" + STATUS_PROTOCOL + mode.prefix + detail;
+            reply = "OK\t" + state + "\t" + owner + "\t" + clone + "\t" + STATUS_PROTOCOL + INSTANCE_ID +
+                " " + mode.prefix + detail;
         }
         writeLine(socket, reply + "\t" + mac(token, "result\t" + nonces + "\t" + reply));
+    }
+
+    private static boolean hasUnfinishedMarketCleanup() {
+        if (cleanupFailed) return true;
+        String[] markers = DIRECTORY.list((dir, name) -> name.startsWith("session-") &&
+            (name.endsWith(".market-ready") || name.endsWith(".market-journal") || name.endsWith(".market-journal.tmp")));
+        return markers == null || markers.length != 0;
+    }
+
+    private static boolean hasLiveSupervisor() {
+        int parent = Os.getppid();
+        String generation = System.getenv("CODEX_DUAL_GENERATION");
+        if (parent <= 1 || !Integer.toString(parent).equals(System.getenv("CODEX_DUAL_SUPERVISOR_PID")) ||
+            generation == null || !generation.matches("[0-9a-f]{32}")) return false;
+        try {
+            byte[] raw = Files.readAllBytes(new File("/proc/" + parent, "cmdline").toPath());
+            String[] arguments = new String(raw, StandardCharsets.UTF_8).split("\\x00");
+            return arguments.length == 3 && ("/system/bin/sh".equals(arguments[0]) || "sh".equals(arguments[0])) &&
+                new File(DIRECTORY, "supervise.sh").getPath().equals(arguments[1]) && generation.equals(arguments[2]) &&
+                generation.equals(fileText(new File(DIRECTORY, "generation"))) && parent == Os.getppid();
+        } catch (IOException | SecurityException error) {
+            return false;
+        }
     }
 
     private static String readLine(Socket socket, long deadline, int limit) throws IOException {
