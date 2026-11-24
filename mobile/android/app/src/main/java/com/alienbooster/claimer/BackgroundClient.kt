@@ -34,9 +34,10 @@ internal class BackgroundClient(context: Context) {
         START_ALL_FOREGROUND(Mode.ALL_FOREGROUND),
         START_CONTINUOUS_BACKGROUND(Mode.CONTINUOUS_BACKGROUND),
         START_CONTINUOUS_FOREGROUND(Mode.CONTINUOUS_FOREGROUND),
-        STOP
+        STOP,
+        RECOVER_STORES
     }
-    enum class State { IDLE, RUNNING, WAITING, STOPPED, DONE, ERROR }
+    enum class State { IDLE, RUNNING, WAITING, STOPPED, DONE, ERROR, RECOVERING, RECOVERED, RECOVERY_FAILED }
     enum class Mode(val prefix: String, val label: String, val foreground: Boolean) {
         BACKGROUND("", "后台领双号", false),
         FOREGROUND("[主屏双号] ", "主屏双号", true),
@@ -213,6 +214,7 @@ internal class BackgroundClient(context: Context) {
         val fields = reply.split('\t', limit = 5)
         if (fields.first() == "ERR") {
             if (fields.getOrNull(1) == "BUSY") return Result.Failed("已有任务运行")
+            if (fields.getOrNull(1) == "RECOVER_BUSY") return Result.Failed("请先暂停领取，等任务收尾后再恢复图标")
             return Result.Failed("后台助手未接受请求，请检查是否已接入此版本")
         }
         if (fields.size != 5 || fields[0] != "OK" || fields[4].any { it.isISOControl() }) {
@@ -222,7 +224,7 @@ internal class BackgroundClient(context: Context) {
         val owner = fields[2].toIntOrNull()?.takeIf { it in -1..21 } ?: throw IOException("Invalid owner progress")
         val clone = fields[3].toIntOrNull()?.takeIf { it in -1..21 } ?: throw IOException("Invalid clone progress")
         if (!fields[4].startsWith(STATUS_PROTOCOL)) {
-            return Result.Failed("后台助手需要更新，请运行 0.12.0 恢复包")
+            return Result.Failed("后台助手需要更新，请运行 0.12.1 恢复包")
         }
         val detail = fields[4].removePrefix(STATUS_PROTOCOL)
         val mode = Mode.entries.firstOrNull { it.prefix.isNotEmpty() && detail.startsWith(it.prefix) }
@@ -233,7 +235,7 @@ internal class BackgroundClient(context: Context) {
 
     companion object {
         private const val PORT = 34783
-        private const val STATUS_PROTOCOL = "[0.12 guarded] "
+        private const val STATUS_PROTOCOL = "[0.12.1] "
         private const val HEX = "0123456789abcdef"
         private val random = SecureRandom()
         private val tokenLock = Any()

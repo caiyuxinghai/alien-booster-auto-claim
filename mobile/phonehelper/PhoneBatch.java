@@ -29,7 +29,8 @@ final class PhoneBatch {
         void status(int owner, int clone, String detail);
         void check() throws Exception;
         default void accountProgress(Map<Integer, Integer> verified) {}
-        default boolean prepareAd() throws Exception { return false; }
+        boolean prepareAd() throws Exception;
+        void confirmAdProtection() throws Exception;
     }
 
     static final class Outside extends Exception {
@@ -243,6 +244,7 @@ final class PhoneBatch {
                 if (page.complete()) break;
                 if (page.button == null) throw new AccountProblem("领取按钮已变化，未点击");
             }
+            control.confirmAdProtection();
             if (!isHome(guard(user, false))) throw interruptedPage(label + "已不在领取主页，未点击");
             shell(5, "input", "-d", displayArg, "tap",
                 Integer.toString(page.button[0]), Integer.toString(page.button[1]));

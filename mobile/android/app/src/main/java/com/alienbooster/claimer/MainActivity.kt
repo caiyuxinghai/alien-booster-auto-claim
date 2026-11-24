@@ -61,7 +61,11 @@ class MainActivity : Activity() {
     private lateinit var schedule: Switch
     private lateinit var scheduleTime: Button
     private lateinit var scheduleStatus: TextView
+    private lateinit var restoreIcons: Button
+    private lateinit var restoreStatus: TextView
     private var snapshot: BackgroundClient.Status? = null
+    private val restoringIcons get() = snapshot?.state == BackgroundClient.State.RECOVERING
+    private var restoreFeedback: String? = null
     private var helperError: String? = null
     private var polling = false
     private var commanding = false
@@ -222,6 +226,45 @@ class MainActivity : Activity() {
         timer.addView(scheduleStatus, row(top = 8))
         timer.addView(label("到点尝试在后台领取全部账号，遵循上面的网络设置。", 13, muted), row(top = 8))
         body.addView(timer, row(top = 12))
+
+        val maintenance = card()
+        maintenance.addView(label("助手维护", 14, accent, true))
+        restoreIcons = button("一键恢复图标", inactive, ink).apply {
+            setOnClickListener { restoreStoreIcons() }
+        }
+        maintenance.addView(restoreIcons, row(height = 48, top = 6))
+        maintenance.addView(label("按保护记录恢复商店显示，图标位置由荣耀桌面安排。", 13, muted), row(top = 8))
+        restoreStatus = label("", 13, muted)
+        maintenance.addView(restoreStatus, row(top = 8))
+        body.addView(maintenance, row(top = 12))
+    }
+
+    private fun restoreStoreIcons() {
+        if (commanding || restoringIcons) return
+        if (maybeActive) {
+            restoreFeedback = "请先暂停领取，等任务收尾后再恢复图标"
+            render()
+            return
+        }
+        commanding = true
+        restoreFeedback = "正在连接后台助手…"
+        render()
+        client.request(BackgroundClient.Command.STATUS) { status ->
+            if (isDestroyed) return@request
+            if (status is BackgroundClient.Result.Ready) {
+                client.request(BackgroundClient.Command.RECOVER_STORES, ::finishStoreRecovery)
+            } else {
+                finishStoreRecovery(status)
+            }
+        }
+    }
+
+    private fun finishStoreRecovery(result: BackgroundClient.Result) {
+        if (isDestroyed) return
+        commanding = false
+        restoreFeedback = (result as? BackgroundClient.Result.Failed)?.message
+        if (result is BackgroundClient.Result.Ready) applyResult(result)
+        else render()
     }
 
     private fun refreshSchedule() {
@@ -239,6 +282,12 @@ class MainActivity : Activity() {
                 if (last.isEmpty()) "" else " · $last"
             else -> "等待系统排程"
         })
+        restoreIcons.isEnabled = !commanding && !restoringIcons
+        val result = snapshot?.takeIf { it.state in restoreStates }
+        val message = restoreFeedback ?: result?.message.orEmpty()
+        restoreStatus.showText(message)
+        restoreStatus.visibility = if (message.isEmpty()) View.GONE else View.VISIBLE
+        restoreStatus.setTextColor(if (result?.state == BackgroundClient.State.RECOVERY_FAILED) warn else muted)
     }
 
     private fun buildHistory(body: LinearLayout) {
@@ -346,6 +395,7 @@ class MainActivity : Activity() {
     private fun startSelected() {
         feedback = null
         if (commanding) { toast("正在处理，请稍候"); return }
+        if (restoringIcons) { toast("正在恢复商店图标，请稍候"); return }
         if (maybeActive) {
             feedback = "正在运行" + activeMode.label + "，切换前请先暂停。"
             render()
@@ -358,7 +408,7 @@ class MainActivity : Activity() {
         client.applyNetworkPolicy(allow) { result ->
             if (isDestroyed) return@applyNetworkPolicy
             applyResult(result)
-            if (result !is BackgroundClient.Result.Ready || maybeActive) {
+            if (result !is BackgroundClient.Result.Ready || maybeActive || restoringIcons) {
                 commanding = false
                 if (maybeActive) feedback = "正在运行" + activeMode.label + "，请先暂停。"
                 render()
@@ -412,6 +462,9 @@ class MainActivity : Activity() {
         val previous = maybeActive
         when (result) {
             is BackgroundClient.Result.Ready -> {
+                if (result.status.state in restoreStates && snapshot?.state != result.status.state) {
+                    restoreFeedback = null
+                }
                 snapshot = result.status
                 activeMode = result.status.mode
                 maybeActive = result.status.state in setOf(BackgroundClient.State.RUNNING, BackgroundClient.State.WAITING)
@@ -439,7 +492,11 @@ class MainActivity : Activity() {
             foreground -> "在主屏轮换使用账号。离开外星仔会暂停。"
             else -> "在虚拟屏轮换使用账号，主屏可以使用其他应用。"
         })
-        start.showText(if (maybeActive) "任务运行中" else "开始 / 继续")
+        start.showText(when {
+            restoringIcons -> "正在恢复图标"
+            maybeActive -> "任务运行中"
+            else -> "开始 / 继续"
+        })
         pause.isEnabled = maybeActive && !commanding
         pause.alpha = if (pause.isEnabled) 1f else .5f
         val status = snapshot
@@ -464,7 +521,8 @@ class MainActivity : Activity() {
                 "上次 · " + status.mode.label + " · " + status.message
             else -> status?.message ?: "正在确认后台助手状态…"
         })
-        statusText.setTextColor(if (feedback != null || helperError != null || status?.state == BackgroundClient.State.ERROR) warn else muted)
+        statusText.setTextColor(if (feedback != null || helperError != null || status?.state == BackgroundClient.State.ERROR ||
+            status?.state == BackgroundClient.State.RECOVERY_FAILED) warn else muted)
     }
 
     private fun page(build: (LinearLayout) -> Unit): ScrollView {
@@ -511,5 +569,10 @@ class MainActivity : Activity() {
     private fun confirm(title: String, message: String, action: () -> Unit) {
         AlertDialog.Builder(this).setTitle(title).setMessage(message)
             .setNegativeButton("取消", null).setPositiveButton("删除") { _, _ -> action() }.show()
+    }
+
+    private companion object {
+        val restoreStates = setOf(BackgroundClient.State.RECOVERING, BackgroundClient.State.RECOVERED,
+            BackgroundClient.State.RECOVERY_FAILED)
     }
 }

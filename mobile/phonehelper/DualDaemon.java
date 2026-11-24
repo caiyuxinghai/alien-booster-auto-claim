@@ -47,7 +47,7 @@ public final class DualDaemon {
     private static final File DIRECTORY = new File("/data/local/tmp/codex-dual");
     private static final String MARKET = new File(DIRECTORY, "market_lease.sh").getPath();
     private static final int PORT = 34783;
-    private static final String STATUS_PROTOCOL = "[0.12 guarded] ";
+    private static final String STATUS_PROTOCOL = "[0.12.1] ";
     private static final String TARGET = "com.etalien.booster";
     private static final String[] STORES = {"com.hihonor.appmarket", "com.android.vending", "com.hihonor.gamecenter"};
     private static final Pattern INSTALL_PRIVILEGE = Pattern.compile(
@@ -155,7 +155,8 @@ public final class DualDaemon {
         String[] command = readLine(socket, deadline, 124).split("\\t", -1);
         Mode requested = command.length == 3 ? Mode.fromCommand(command[1]) : null;
         if (command.length != 3 || !"CMD".equals(command[0]) ||
-            (requested == null && !command[1].matches("STATUS|STOP|NET_WIFI_ONLY|NET_ALLOW_MOBILE|SCHEDULE_ALL_BACKGROUND")
+            (requested == null && !command[1].matches(
+                "STATUS|STOP|NET_WIFI_ONLY|NET_ALLOW_MOBILE|SCHEDULE_ALL_BACKGROUND|RECOVER_STORES")
                 && !TaskHistory.supports(command[1])) ||
             !MessageDigest.isEqual(mac(token, "cmd\t" + nonces + "\t" + command[1])
                 .getBytes(StandardCharsets.US_ASCII), command[2].getBytes(StandardCharsets.US_ASCII))) return;
@@ -170,15 +171,19 @@ public final class DualDaemon {
             return;
         }
         synchronized (DualDaemon.class) {
-            if ("SCHEDULE_ALL_BACKGROUND".equals(command[1]) && worker != null && worker.isAlive()) {
-                reply = "ERR\tBUSY";
+            String action = command[1];
+            boolean busy = worker != null && worker.isAlive();
+            if (busy && ("RECOVER_STORES".equals(action) || "SCHEDULE_ALL_BACKGROUND".equals(action)
+                || (requested != null && "RECOVERING".equals(state)))) {
+                reply = "ERR\t" + ("RECOVER_STORES".equals(action) ? "RECOVER_BUSY" : "BUSY");
                 writeLine(socket, reply + "\t" + mac(token, "result\t" + nonces + "\t" + reply));
                 return;
             }
             if (requested != null) start(requested);
-            else if ("SCHEDULE_ALL_BACKGROUND".equals(command[1])) start(Mode.ALL_BACKGROUND);
-            else if (command[1].startsWith("NET_")) {
-                boolean next = "NET_ALLOW_MOBILE".equals(command[1]);
+            else if ("SCHEDULE_ALL_BACKGROUND".equals(action)) start(Mode.ALL_BACKGROUND);
+            else if ("RECOVER_STORES".equals(action)) recoverStores();
+            else if (action.startsWith("NET_")) {
+                boolean next = "NET_ALLOW_MOBILE".equals(action);
                 if (allowMobile != next) {
                     File temp = new File(DIRECTORY, "network-policy.tmp");
                     Files.write(temp.toPath(), (next ? "ALLOW_MOBILE" : "WIFI_ONLY").getBytes(StandardCharsets.US_ASCII));
@@ -187,7 +192,7 @@ public final class DualDaemon {
                     allowMobile = next;
                 }
             }
-            else if ("STOP".equals(command[1]) && worker != null && worker.isAlive()) {
+            else if ("STOP".equals(action) && busy && ("RUNNING".equals(state) || "WAITING".equals(state))) {
                 stop = true;
                 synchronized (WAIT) { WAIT.notifyAll(); }
                 update("RUNNING", "正在暂停并收尾");
@@ -243,6 +248,22 @@ public final class DualDaemon {
         progress = Collections.emptyMap();
         update("RUNNING", "正在核对安装保护");
         worker = new Thread(() -> run(requested), "dual-claim");
+        worker.start();
+    }
+
+    // The shared worker reserves the task slot until the journal recovery finishes.
+    private static void recoverStores() {
+        update("RECOVERING", "正在按记录恢复商店图标");
+        worker = new Thread(() -> {
+            try {
+                shell(45, "/system/bin/sh", MARKET, "--recover");
+                cleanupFailed = false;
+                update("RECOVERED", "商店恢复检查完成");
+            } catch (IOException | RuntimeException error) {
+                cleanupFailed = true;
+                update("RECOVERY_FAILED", "商店恢复未确认，请稍后重试");
+            }
+        }, "store-recovery");
         worker.start();
     }
 
@@ -345,14 +366,14 @@ public final class DualDaemon {
 
                 @Override public boolean prepareAd() throws Exception {
                     checkStop();
-                    lease.checkNetwork(true);
-                    if (lease.started) {
-                        lease.check(false);
-                        return false;
-                    }
+                    if (lease.started) return false;
                     update("RUNNING", withProgress(selection, "正在启用本轮广告安装保护"));
                     lease.start();
                     return true;
+                }
+
+                @Override public void confirmAdProtection() throws Exception {
+                    lease.check(true);
                 }
             };
             if (requested == Mode.FOREGROUND_SOLO_TRIAL) {
@@ -545,7 +566,7 @@ public final class DualDaemon {
                 noProgress = total > lastTotal ? 0 : noProgress + 1;
                 lastTotal = total;
                 if (noProgress >= 3) {
-                    throw new IOException("重建虚拟屏后连续未推进，请稍后点后台领双号");
+                    throw new IOException("重建虚拟屏后连续未推进，请稍后点「开始 / 继续」");
                 }
                 rotate = (rotate + 1) % profiles.size();
                 update("RUNNING", "虚拟屏中断，正在重建并核对另一账号");

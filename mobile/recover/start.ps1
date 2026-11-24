@@ -58,10 +58,13 @@ function Invoke-DeviceShell([string]$Program) {
             $errorName = 'DEVICE_ERROR'
             if ($outputText -match '(?m)^FAIL_([A-Z_]+)\s*$') { $errorName = $Matches[1] }
             if ($errorName -in @('HELPER_ACTIVE','MARKET_ACTIVE')) {
-                throw '任务或商店保护仍在运行。请先在手机点「暂停」，等任务收尾后再更新。'
+                throw '任务或商店保护仍在运行。请先在手机点「暂停」，等收尾后再重启或更新。'
             }
             if ($errorName -eq 'HELPER_STATE_UNKNOWN') {
-                throw '无法确认现有后台助手已停止领取，更新已停止。'
+                throw '无法确认现有后台助手已停止领取。请检查手机状态后重试。'
+            }
+            if ($errorName -eq 'HELPER_REPLACED') {
+                throw '另一处正在重新配置后台助手。请回到手机领取页查看状态。'
             }
             throw ("配置失败（$errorName）。请保持手机解锁，打开「外星仔领时长」后重试。")
         }
@@ -105,15 +108,25 @@ try {
     $model = (Invoke-DeviceAdb @('shell','getprop','ro.product.model') | Out-String).Trim()
     if ($model -notmatch '^AAP[-_]AN00$') { throw ('连接设备型号为 ' + $model + '。这个恢复包只用于荣耀 WIN Y。') }
     $package = Invoke-DeviceAdb @('shell','dumpsys','package',$pkg)
-    if (-not ($package | Where-Object { $_ -match '^\s*versionName=0\.12\.0\s*$' })) {
-        throw '手机需要先安装「外星仔领时长」0.12.0。'
+    if (-not ($package | Where-Object { $_ -match '^\s*versionName=0\.12\.1\s*$' })) {
+        throw '手机需要先安装「外星仔领时长」0.12.1。'
     }
     foreach ($name in @('dual-helper.jar','market_lease.sh','supervise.sh')) {
         if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $name) -PathType Leaf)) {
             throw ('恢复包缺少 ' + $name + '，请先完整解压。')
         }
     }
-    $helperHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $PSScriptRoot 'dual-helper.jar')).Hash.ToLowerInvariant()
+    $helperDigest = [Security.Cryptography.SHA256]::Create()
+    try {
+        $helperStream = [IO.File]::OpenRead((Join-Path $PSScriptRoot 'dual-helper.jar'))
+        try {
+            $helperHash = [BitConverter]::ToString($helperDigest.ComputeHash($helperStream)).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $helperStream.Dispose()
+        }
+    } finally {
+        $helperDigest.Dispose()
+    }
     $replace = if ($ReplaceIdleHelper) { '1' } else { '0' }
     $initialScript = @'
 set -eu
@@ -124,7 +137,9 @@ mkdir -p "$d"
 [ "$(stat -c %u "$d")" = 2000 ] || { echo FAIL_PRIVATE_DIR; exit 1; }
 chmod 700 "$d"
 ps -A -o USER,PID,ARGS | grep -qE '^[[:space:]]*shell[[:space:]]+[0-9]+[[:space:]]+([^ ]*/)?app_process(32|64)?[[:space:]]+/[[:space:]]+DualDaemon[[:space:]]*$' && {
-  if [ REPLACEIDLEHELPER -eq 0 ] && [ "$(sha256sum "$d/dual-helper.jar" 2>/dev/null | cut -d ' ' -f 1)" = 'HELPERHASH' ]; then
+  if [ REPLACEIDLEHELPER -eq 0 ] &&
+     grep -q '^DUAL_DAEMON_READY$' "$d/daemon.log" 2>/dev/null &&
+     [ "$(sha256sum "$d/dual-helper.jar" 2>/dev/null | cut -d ' ' -f 1)" = 'HELPERHASH' ]; then
     echo ALREADY_RUNNING
     exit 0
   fi
@@ -175,8 +190,8 @@ replace_idle() {
     if (found) { if (state == "") exit 1; print state }
   }' daemon.log) || { echo FAIL_HELPER_STATE_UNKNOWN; exit 1; }
   case "$last" in
-    RUNNING|WAITING) echo FAIL_HELPER_ACTIVE; exit 1;;
-    ''|IDLE|DONE|STOPPED|ERROR) ;;
+    RUNNING|WAITING|RECOVERING) echo FAIL_HELPER_ACTIVE; exit 1;;
+    ''|IDLE|DONE|STOPPED|ERROR|RECOVERED|RECOVERY_FAILED) ;;
     *) echo FAIL_HELPER_STATE_UNKNOWN; exit 1;;
   esac
   [ "$(helper_pids)" = "$old" ] || { echo FAIL_HELPER_STATE_UNKNOWN; exit 1; }
@@ -194,6 +209,7 @@ replace_idle() {
   exec 8>&-
 }
 if alive && [ REPLACEIDLEHELPER -eq 0 ] &&
+   grep -q '^DUAL_DAEMON_READY$' daemon.log 2>/dev/null &&
    [ "$(sha256sum dual-helper.jar 2>/dev/null | cut -d ' ' -f 1)" = 'HELPERHASH' ]; then
   echo ALREADY_RUNNING
   exit 0
@@ -224,6 +240,7 @@ setsid /system/bin/sh "$d/supervise.sh" STAGEID 9>&- </dev/null >"$d/supervisor.
 exec 9>&-
 i=0
 while [ "$i" -lt 60 ]; do
+  if [ "$(cat generation 2>/dev/null)" != STAGEID ]; then echo FAIL_HELPER_REPLACED; exit 1; fi
   if grep -q '^DUAL_DAEMON_READY$' daemon.log && alive; then echo READY; exit 0; fi
   i=$((i+1))
   sleep 0.4
