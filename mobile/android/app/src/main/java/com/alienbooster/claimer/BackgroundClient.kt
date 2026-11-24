@@ -27,6 +27,8 @@ internal class BackgroundClient(context: Context) {
         STATUS,
         START(Mode.BACKGROUND),
         START_FOREGROUND(Mode.FOREGROUND),
+        START_FOREGROUND_SOLO(Mode.FOREGROUND_SOLO),
+        START_FOREGROUND_SOLO_TRIAL(Mode.FOREGROUND_SOLO),
         START_ALL_BACKGROUND(Mode.ALL_BACKGROUND),
         SCHEDULE_ALL_BACKGROUND(Mode.ALL_BACKGROUND),
         START_ALL_FOREGROUND(Mode.ALL_FOREGROUND),
@@ -38,6 +40,7 @@ internal class BackgroundClient(context: Context) {
     enum class Mode(val prefix: String, val label: String, val foreground: Boolean) {
         BACKGROUND("", "后台领双号", false),
         FOREGROUND("[主屏双号] ", "主屏双号", true),
+        FOREGROUND_SOLO("[主屏仅主号] ", "主屏仅主号", true),
         ALL_BACKGROUND("[后台全部] ", "后台全部账号", false),
         ALL_FOREGROUND("[主屏全部] ", "主屏全部账号", true),
         CONTINUOUS_BACKGROUND("[后台持续] ", "后台持续观看", false),
@@ -65,7 +68,7 @@ internal class BackgroundClient(context: Context) {
     private fun enqueue(command: String, onResult: (Result) -> Unit) {
         executor.execute {
             val result = try {
-                parse(exchange(command, false), command == "STATUS")
+                parse(exchange(command, false))
             } catch (error: TransportError) {
                 Result.Failed(error.message ?: "后台助手连接失败", error.maybeSent)
             } catch (_: IOException) {
@@ -206,7 +209,7 @@ internal class BackgroundClient(context: Context) {
         }
     }
 
-    private fun parse(reply: String, statusCheck: Boolean): Result {
+    private fun parse(reply: String): Result {
         val fields = reply.split('\t', limit = 5)
         if (fields.first() == "ERR") {
             if (fields.getOrNull(1) == "BUSY") return Result.Failed("已有任务运行")
@@ -218,10 +221,10 @@ internal class BackgroundClient(context: Context) {
         val state = State.entries.firstOrNull { it.name == fields[1] } ?: throw IOException("Invalid state")
         val owner = fields[2].toIntOrNull()?.takeIf { it in -1..21 } ?: throw IOException("Invalid owner progress")
         val clone = fields[3].toIntOrNull()?.takeIf { it in -1..21 } ?: throw IOException("Invalid clone progress")
-        if (statusCheck && !fields[4].startsWith(STATUS_PROTOCOL)) {
+        if (!fields[4].startsWith(STATUS_PROTOCOL)) {
             return Result.Failed("后台助手需要更新，请运行 0.12.0 恢复包")
         }
-        val detail = if (statusCheck) fields[4].removePrefix(STATUS_PROTOCOL) else fields[4]
+        val detail = fields[4].removePrefix(STATUS_PROTOCOL)
         val mode = Mode.entries.firstOrNull { it.prefix.isNotEmpty() && detail.startsWith(it.prefix) }
             ?: Mode.BACKGROUND
         val message = detail.removePrefix(mode.prefix)
@@ -230,7 +233,7 @@ internal class BackgroundClient(context: Context) {
 
     companion object {
         private const val PORT = 34783
-        private const val STATUS_PROTOCOL = "[0.12] "
+        private const val STATUS_PROTOCOL = "[0.12 guarded] "
         private const val HEX = "0123456789abcdef"
         private val random = SecureRandom()
         private val tokenLock = Any()

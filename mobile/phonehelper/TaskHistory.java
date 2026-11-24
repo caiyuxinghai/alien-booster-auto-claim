@@ -35,7 +35,7 @@ final class TaskHistory {
         try {
             JSONObject record = new JSONObject()
                 .put("id", UUID.randomUUID().toString()).put("started", started).put("end", end)
-                .put("elapsed", elapsed).put("mode", label(mode, 20)).put("reason", label(reason, 100))
+                .put("elapsed", elapsed).put("mode", label(mode, 32)).put("reason", label(reason, 100))
                 .put("gained", gained);
             JSONArray previous = read();
             JSONArray next = new JSONArray().put(record);

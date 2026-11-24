@@ -159,10 +159,12 @@ internal object RunHistory {
             val mode = if (local) rawMode else when (rawMode) {
                 "BACKGROUND" -> "后台双号"
                 "FOREGROUND" -> "主屏双号"
+                "FOREGROUND_SOLO" -> "主屏仅主号"
+                "FOREGROUND_SOLO_TRIAL", "FOREGROUND_SOLO_TRIA" -> "主屏主号试跑"
                 "ALL_BACKGROUND" -> "后台全部账号"
                 "ALL_FOREGROUND" -> "主屏全部账号"
-                "CONTINUOUS_BACKGROUND" -> "后台持续观看"
-                "CONTINUOUS_FOREGROUND" -> "主屏持续观看"
+                "CONTINUOUS_BACKGROUND", "CONTINUOUS_BACKGROUN" -> "后台持续观看"
+                "CONTINUOUS_FOREGROUND", "CONTINUOUS_FOREGROUN" -> "主屏持续观看"
                 else -> rawMode
             }
             return RunRecord(id, started, end, elapsed, clean(mode, 20),

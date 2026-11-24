@@ -132,6 +132,15 @@ final class PhoneBatch {
 
     static void runProfiles(int displayId, Control control, List<Integer> profiles, int rotate,
             boolean foregroundContinuation) throws Exception {
+        runProfiles(displayId, control, profiles, rotate, foregroundContinuation, false);
+    }
+
+    static boolean tryOneOwnerAd(Control control) throws Exception {
+        return runProfiles(0, control, Collections.singletonList(0), 0, false, true);
+    }
+
+    private static boolean runProfiles(int displayId, Control control, List<Integer> profiles, int rotate,
+            boolean foregroundContinuation, boolean tryOneAd) throws Exception {
         if (displayId < 0 || (foregroundContinuation && displayId != 0)) {
             throw new IllegalArgumentException("主屏续轮只允许屏幕 0");
         }
@@ -141,7 +150,7 @@ final class PhoneBatch {
                 PosixFilePermissions.fromString("rwx------")));
         File xml = directory.resolve("window.xml").toFile();
         try {
-            new PhoneBatch(displayId, control, xml, checked).runAccounts(rotate, foregroundContinuation);
+            return new PhoneBatch(displayId, control, xml, checked).runAccounts(rotate, foregroundContinuation, tryOneAd);
         } finally {
             Files.deleteIfExists(xml.toPath());
             Files.deleteIfExists(directory);
@@ -159,7 +168,7 @@ final class PhoneBatch {
         return Collections.unmodifiableList(new ArrayList<>(checked));
     }
 
-    private void runAccounts(int rotate, boolean foregroundContinuation) throws Exception {
+    private boolean runAccounts(int rotate, boolean foregroundContinuation, boolean tryOneAd) throws Exception {
         if (displayId == 0) {
             Focus initial = readFocus().get(0);
             if (foregroundContinuation && isTarget(initial) && isHome(initial)) {
@@ -180,6 +189,10 @@ final class PhoneBatch {
             String label = user == 0 ? "主号" : user == 128 ? "分身" : "账号 " + user;
             order.add(new Account(user, label));
         }
+        if (tryOneAd) {
+            control.check();
+            return visitAccount(order.get(0), 1);
+        }
         boolean workLeft;
         do {
             workLeft = false;
@@ -187,7 +200,7 @@ final class PhoneBatch {
                 if (!account.eligible()) continue;
                 control.check();
                 try {
-                    visitAccount(account);
+                    visitAccount(account, 2);
                     account.failedVisits = 0;
                     account.lastIssue = null;
                 } catch (AccountProblem unavailable) {
@@ -208,17 +221,19 @@ final class PhoneBatch {
         }
         if (incomplete) throw new Incomplete(failure.toString());
         status("已核对 " + order.size() + " 个账号今日各 21/21");
+        return false;
     }
 
-    private void visitAccount(Account account) throws Exception {
+    private boolean visitAccount(Account account, int maxAttempts) throws Exception {
         int user = account.user;
         String label = account.label;
         status("正在核对" + label + "实际进度");
         restart(user);
         Page page = freshPage(user);
         record(account, page);
+        boolean confirmed = false;
         // An account gets up to two ad attempts each visit, even if it has many left.
-        for (int attempt = 0; attempt < 2 && !page.complete(); attempt++) {
+        for (int attempt = 0; attempt < maxAttempts && !page.complete(); attempt++) {
             if (page.button == null) throw new AccountProblem("没有唯一可识别的领取按钮，未点击");
             if (!isHome(guard(user, false))) throw interruptedPage(label + "已不在领取主页，未点击");
             // Activating the protection can take a moment. Refresh the button after it changes.
@@ -238,8 +253,10 @@ final class PhoneBatch {
             record(account, next);
             page = next;
             if (unchanged) throw new AccountProblem("本条未确认入账");
+            confirmed = true;
         }
         if (page.complete()) status(label + "今日进度已满 21/21");
+        return confirmed;
     }
 
     private void record(Account account, Page page) throws IOException {

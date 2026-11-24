@@ -3,16 +3,12 @@ package com.alienbooster.claimer
 import android.app.Activity
 import android.app.AlertDialog
 import android.app.TimePickerDialog
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.provider.Settings
 import android.text.format.DateFormat
 import android.view.Gravity
 import android.view.View
@@ -65,13 +61,10 @@ class MainActivity : Activity() {
     private lateinit var schedule: Switch
     private lateinit var scheduleTime: Button
     private lateinit var scheduleStatus: TextView
-    private lateinit var permission: Button
     private var snapshot: BackgroundClient.Status? = null
     private var helperError: String? = null
-    private var checked = false
     private var polling = false
     private var commanding = false
-    private var mainLaunching = false
     private var maybeActive = false
     private var activeMode = BackgroundClient.Mode.BACKGROUND
     private var feedback: String? = null
@@ -123,7 +116,6 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        checked = false
         handler.removeCallbacks(refresh)
         handler.post(refresh)
         if (tab == Tab.HISTORY) loadHistory()
@@ -230,19 +222,6 @@ class MainActivity : Activity() {
         timer.addView(scheduleStatus, row(top = 8))
         timer.addView(label("到点尝试在后台领取全部账号，遵循上面的网络设置。", 13, muted), row(top = 8))
         body.addView(timer, row(top = 12))
-        val access = card()
-        access.addView(label("主屏单号权限", 14, accent, true))
-        permission = button("无障碍设置", inactive, ink).apply { setOnClickListener { openAccessibility() } }
-        access.addView(permission, row(height = 46, top = 8))
-        access.addView(button("复制单号诊断日志", panel, muted).apply {
-            setOnClickListener {
-                (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(
-                    ClipData.newPlainText("领取诊断", SoloStore.logs(this@MainActivity))
-                )
-                toast("已复制")
-            }
-        }, row(height = 42, top = 4))
-        body.addView(access, row(top = 12))
     }
 
     private fun refreshSchedule() {
@@ -260,7 +239,6 @@ class MainActivity : Activity() {
                 if (last.isEmpty()) "" else " · $last"
             else -> "等待系统排程"
         })
-        permission.showText(if (AdAccessibilityService.instance != null) "主屏单号权限已连接 · 查看" else "开启主屏单号无障碍权限")
     }
 
     private fun buildHistory(body: LinearLayout) {
@@ -356,7 +334,8 @@ class MainActivity : Activity() {
     }
 
     private fun command() = when (scope) {
-        Scope.SOLO -> null
+        Scope.SOLO -> if (trial.isChecked) BackgroundClient.Command.START_FOREGROUND_SOLO_TRIAL
+                      else BackgroundClient.Command.START_FOREGROUND_SOLO
         Scope.DUAL -> if (foreground) BackgroundClient.Command.START_FOREGROUND else BackgroundClient.Command.START
         Scope.ALL -> if (foreground) BackgroundClient.Command.START_ALL_FOREGROUND else BackgroundClient.Command.START_ALL_BACKGROUND
         Scope.CONTINUOUS -> if (foreground) BackgroundClient.Command.START_CONTINUOUS_FOREGROUND else BackgroundClient.Command.START_CONTINUOUS_BACKGROUND
@@ -366,32 +345,27 @@ class MainActivity : Activity() {
 
     private fun startSelected() {
         feedback = null
-        if (commanding || mainLaunching) { toast("正在处理，请稍候"); return }
-        if (maybeActive || mainRunning()) {
-            feedback = "正在运行" + (if (mainRunning()) "主屏仅主号" else activeMode.label) + "，切换前请先暂停。"
+        if (commanding) { toast("正在处理，请稍候"); return }
+        if (maybeActive) {
+            feedback = "正在运行" + activeMode.label + "，切换前请先暂停。"
             render()
             return
         }
-        if (!checked) { toast("正在确认当前任务，请稍候"); return }
-        if (scope == Scope.SOLO) {
-            startSolo()
-        } else {
-            val desired = command() ?: return
-            commanding = true
-            render()
-            val allow = RunPrefs.allowMobile(this)
-            client.applyNetworkPolicy(allow) { result ->
-                if (isDestroyed) return@applyNetworkPolicy
-                applyResult(result)
-                if (result !is BackgroundClient.Result.Ready || maybeActive || mainRunning()) {
-                    commanding = false
-                    if (maybeActive) feedback = "正在运行" + activeMode.label + "，请先暂停。"
-                    render()
-                    return@applyNetworkPolicy
-                }
-                lastAppliedPolicy = allow
-                send(desired)
+        val desired = command()
+        commanding = true
+        render()
+        val allow = RunPrefs.allowMobile(this)
+        client.applyNetworkPolicy(allow) { result ->
+            if (isDestroyed) return@applyNetworkPolicy
+            applyResult(result)
+            if (result !is BackgroundClient.Result.Ready || maybeActive) {
+                commanding = false
+                if (maybeActive) feedback = "正在运行" + activeMode.label + "，请先暂停。"
+                render()
+                return@applyNetworkPolicy
             }
+            lastAppliedPolicy = allow
+            send(desired)
         }
     }
 
@@ -427,45 +401,14 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun startSolo() {
-        if (!networkPermitsSolo()) {
-            feedback = if (RunPrefs.allowMobile(this)) "当前没有可用网络" else "仅允许 Wi-Fi，连接后再点开始"
-            render()
-            return
-        }
-        val service = AdAccessibilityService.instance
-        if (service == null) {
-            AlertDialog.Builder(this).setTitle("主屏单号需要无障碍权限")
-                .setMessage("在系统无障碍设置中开启「外星仔一键领时长」，回到这里再点开始。")
-                .setPositiveButton("去开启") { _, _ -> openAccessibility() }
-                .setNegativeButton("取消", null).show()
-            return
-        }
-        mainLaunching = true
-        render()
-        moveTaskToBack(true)
-        handler.postDelayed({
-            mainLaunching = false
-            if (!isDestroyed && !maybeActive && !mainRunning() && networkPermitsSolo()) service.startRun(if (trial.isChecked) 1 else 21)
-        }, 350)
-    }
-
-    private fun networkPermitsSolo(): Boolean = RunPrefs.networkAllowed(this)
-
     private fun pauseTask() {
         feedback = null
         if (commanding) { toast("正在处理，请稍候"); return }
-        if (maybeActive) { send(BackgroundClient.Command.STOP); return }
-        if (mainRunning() || mainLaunching) {
-            mainLaunching = false
-            AdAccessibilityService.instance?.pauseRun("已暂停，可点开始 / 继续")
-                ?: SoloStore.update(this, running = false, status = "已暂停，可点开始 / 继续")
-            render()
-        } else toast("当前没有运行中的任务")
+        if (maybeActive) send(BackgroundClient.Command.STOP)
+        else toast("当前没有运行中的任务")
     }
 
     private fun applyResult(result: BackgroundClient.Result) {
-        checked = true
         val previous = maybeActive
         when (result) {
             is BackgroundClient.Result.Ready -> {
@@ -481,13 +424,6 @@ class MainActivity : Activity() {
         render()
     }
 
-    private fun openAccessibility() {
-        runCatching { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
-            .onFailure { toast("请从系统设置打开无障碍权限") }
-    }
-
-    private fun mainRunning() = AdAccessibilityService.instance != null && SoloStore.running(this)
-
     private fun render() {
         if (tab == Tab.SETTINGS) renderSettings()
         if (tab != Tab.CLAIM) return
@@ -498,43 +434,37 @@ class MainActivity : Activity() {
         }
         trial.visibility = if (scope == Scope.SOLO && !maybeActive) View.VISIBLE else View.GONE
         modeHint.showText(when {
-            scope == Scope.SOLO -> "用无障碍服务操作主号，手机需保持解锁。"
+            scope == Scope.SOLO -> "在主屏领取主号，离开外星仔会暂停。"
             scope == Scope.CONTINUOUS -> "领满后等待复查，可随时暂停。"
             foreground -> "在主屏轮换使用账号。离开外星仔会暂停。"
             else -> "在虚拟屏轮换使用账号，主屏可以使用其他应用。"
         })
-        val solo = mainRunning() || mainLaunching
-        val busy = maybeActive || solo
-        val soloView = solo || (!maybeActive && scope == Scope.SOLO)
-        start.showText(if (busy) "任务运行中" else "开始 / 继续")
-        pause.isEnabled = (busy || commanding) && !commanding
+        start.showText(if (maybeActive) "任务运行中" else "开始 / 继续")
+        pause.isEnabled = maybeActive && !commanding
         pause.alpha = if (pause.isEnabled) 1f else .5f
         val status = snapshot
         val selected = selectedLabel()
         statusTitle.showText(when {
-            commanding || mainLaunching -> "正在处理…"
-            solo -> "正在运行 · 主屏仅主号"
+            commanding -> "正在处理…"
             maybeActive && status?.state == BackgroundClient.State.WAITING -> "等待中 · " + activeMode.label
             maybeActive -> "正在运行 · " + activeMode.label
             else -> "当前选择 · $selected"
         })
         progress.showText(when {
-            soloView -> SoloStore.stages(this)
             status == null || (status.owner < 0 && status.clone < 0) -> ""
+            status.mode == BackgroundClient.Mode.FOREGROUND_SOLO -> "主号 " + status.owner + "/21"
             else -> "主号 " + (if (status.owner < 0) "—" else status.owner.toString()) + "/21     分身 " +
                 (if (status.clone < 0) "—" else status.clone.toString()) + "/21"
         })
         progress.visibility = if (progress.text.isEmpty()) View.GONE else View.VISIBLE
         statusText.showText(feedback ?: when {
             commanding -> "正在向手机助手发送请求"
-            soloView -> SoloStore.status(this)
             helperError != null -> helperError!!
-            !checked -> "正在确认后台助手状态…"
             !maybeActive && status != null && status.state in setOf(BackgroundClient.State.DONE, BackgroundClient.State.ERROR, BackgroundClient.State.STOPPED) ->
                 "上次 · " + status.mode.label + " · " + status.message
             else -> status?.message ?: "正在确认后台助手状态…"
         })
-        statusText.setTextColor(if (feedback != null || (!soloView && (helperError != null || status?.state == BackgroundClient.State.ERROR))) warn else muted)
+        statusText.setTextColor(if (feedback != null || helperError != null || status?.state == BackgroundClient.State.ERROR) warn else muted)
     }
 
     private fun page(build: (LinearLayout) -> Unit): ScrollView {

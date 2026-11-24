@@ -47,7 +47,7 @@ public final class DualDaemon {
     private static final File DIRECTORY = new File("/data/local/tmp/codex-dual");
     private static final String MARKET = new File(DIRECTORY, "market_lease.sh").getPath();
     private static final int PORT = 34783;
-    private static final String STATUS_PROTOCOL = "[0.12] ";
+    private static final String STATUS_PROTOCOL = "[0.12 guarded] ";
     private static final String TARGET = "com.etalien.booster";
     private static final String[] STORES = {"com.hihonor.appmarket", "com.android.vending", "com.hihonor.gamecenter"};
     private static final Pattern INSTALL_PRIVILEGE = Pattern.compile(
@@ -83,6 +83,8 @@ public final class DualDaemon {
     private enum Mode {
         BACKGROUND("START", "", false, false, false),
         FOREGROUND("START_FOREGROUND", "[主屏双号] ", true, false, false),
+        FOREGROUND_SOLO("START_FOREGROUND_SOLO", "[主屏仅主号] ", true, false, false),
+        FOREGROUND_SOLO_TRIAL("START_FOREGROUND_SOLO_TRIAL", "[主屏仅主号] ", true, false, false),
         ALL_BACKGROUND("START_ALL_BACKGROUND", "[后台全部] ", false, true, false),
         ALL_FOREGROUND("START_ALL_FOREGROUND", "[主屏全部] ", true, true, false),
         CONTINUOUS_BACKGROUND("START_CONTINUOUS_BACKGROUND", "[后台持续] ", false, true, true),
@@ -190,8 +192,7 @@ public final class DualDaemon {
                 synchronized (WAIT) { WAIT.notifyAll(); }
                 update("RUNNING", "正在暂停并收尾");
             }
-            String protocol = "STATUS".equals(command[1]) ? STATUS_PROTOCOL : "";
-            reply = "OK\t" + state + "\t" + owner + "\t" + clone + "\t" + protocol + mode.prefix + detail;
+            reply = "OK\t" + state + "\t" + owner + "\t" + clone + "\t" + STATUS_PROTOCOL + mode.prefix + detail;
         }
         writeLine(socket, reply + "\t" + mac(token, "result\t" + nonces + "\t" + reply));
     }
@@ -260,12 +261,21 @@ public final class DualDaemon {
             boolean continuation = false;
             for (;;) {
                 checkStop();
-                Selection selection = requested.all ? discoverProfiles() : new Selection(DUAL, 0);
+                Selection selection = requested.all ? discoverProfiles() : new Selection(
+                    requested == Mode.FOREGROUND_SOLO || requested == Mode.FOREGROUND_SOLO_TRIAL
+                        ? Collections.singletonList(0) : DUAL, 0);
                 if (selection.profiles.isEmpty()) throw new IOException("当前没有可核对的外星仔账号");
                 boolean complete;
+                String result = "";
                 try {
-                    runCycle(requested, selection, continuation);
+                    result = runCycle(requested, selection, continuation);
                     complete = true;
+                } catch (InstallChangedBeforeAd busy) {
+                    if (requested.foreground) throw busy;
+                    update("WAITING", withProgress(selection, "等待已有应用更新结束，可暂停"));
+                    awaitNextCycle(requested, selection, INSTALL_RECHECK_MS);
+                    continuation = true;
+                    continue;
                 } catch (NetworkUnavailable unavailable) {
                     if (!requested.continuous) throw unavailable;
                     awaitNetwork(requested, selection);
@@ -276,7 +286,8 @@ public final class DualDaemon {
                     complete = false;
                 }
                 if (!requested.continuous) {
-                    finalDetail = selection.profiles.size() + " 个可用账号已领满" + selection.skippedNote();
+                    finalDetail = requested == Mode.FOREGROUND_SOLO_TRIAL ? result :
+                        selection.profiles.size() + " 个可用账号已领满" + selection.skippedNote();
                     break;
                 }
                 long delay = complete ? QUOTA_WAIT_MS : INCOMPLETE_WAIT_MS;
@@ -297,7 +308,7 @@ public final class DualDaemon {
         }
     }
 
-    private static void runCycle(Mode requested, Selection selection, boolean continuation) throws Exception {
+    private static String runCycle(Mode requested, Selection selection, boolean continuation) throws Exception {
         Lease lease = new Lease(selection.profiles);
         long startedAt = System.currentTimeMillis();
         long startClock = SystemClock.elapsedRealtime();
@@ -344,6 +355,12 @@ public final class DualDaemon {
                     return true;
                 }
             };
+            if (requested == Mode.FOREGROUND_SOLO_TRIAL) {
+                boolean confirmed = PhoneBatch.tryOneOwnerAd(control);
+                lease.check(true);
+                outcome = confirmed ? "试跑 1 条已确认到账" : "主号今日已满 21/21";
+                return outcome;
+            }
             if (requested.foreground) {
                 PhoneBatch.runProfiles(0, control, selection.profiles, 0, continuation);
             } else {
@@ -355,8 +372,10 @@ public final class DualDaemon {
                     throw new IOException("仍有账号的满额进度尚未核实");
                 }
             }
+            return outcome;
         } catch (Exception failure) {
             outcome = failure instanceof Stopped ? "已暂停" : sanitize(failure.getMessage());
+            if (failure instanceof InstallChangedBeforeAd && !requested.foreground) outcome = null;
             throw failure;
         } finally {
             update("RUNNING", withProgress(selection, lease.started ? "正在恢复应用商店" : "正在收尾"));
@@ -366,7 +385,8 @@ public final class DualDaemon {
                 gained += Math.max(0, account.getValue() - first.get(account.getKey()));
             }
             try {
-                if (!requested.continuous || gained > 0 || !"已领满".equals(outcome) || !restored) {
+                if (!restored || (outcome != null &&
+                    (!requested.continuous || gained > 0 || !"已领满".equals(outcome)))) {
                     TaskHistory.add(startedAt, System.currentTimeMillis(), SystemClock.elapsedRealtime() - startClock,
                         requested.name(), restored ? outcome : "未确认商店恢复", gained);
                 }
@@ -586,6 +606,10 @@ public final class DualDaemon {
         InstallBusy() { super("手机存在活跃的应用安装任务，稍后再试"); }
     }
 
+    private static final class InstallChangedBeforeAd extends IOException {
+        InstallChangedBeforeAd(String detail) { super(detail); }
+    }
+
     private static final class Lease {
         private final String base = new File(DIRECTORY, "session-" + UUID.randomUUID()).getPath();
         private final long start = SystemClock.elapsedRealtime();
@@ -655,8 +679,17 @@ public final class DualDaemon {
 
         private void verifyProtection(long now) throws IOException {
             verifyInstallPermissions();
-            if (!initial.containsAll(installSessions())) {
-                throw new IOException("检测到新安装会话，已暂停");
+            Set<String> sessions;
+            try {
+                sessions = installSessions();
+            } catch (InstallBusy busy) {
+                if (!started) throw new InstallChangedBeforeAd(busy.getMessage());
+                throw busy;
+            }
+            if (!initial.containsAll(sessions)) {
+                String message = "检测到新安装会话，已暂停";
+                if (!started) throw new InstallChangedBeforeAd(message);
+                throw new IOException(message);
             }
             if (!started) {
                 lastCheck = now;
