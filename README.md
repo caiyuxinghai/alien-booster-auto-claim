@@ -1,58 +1,68 @@
-# alien-booster-auto-claim
+# 外星仔加速器领时长
 
-外星仔加速器（`com.etalien.booster`）「看广告领时长」每日任务的自动化方案，包含两套经过真机长期验证的实现：
+在本人授权调试的 Android 手机上，通过外星仔加速器页面领取广告时长。程序重新读取页面阶段确认到账。再次开始时按实际进度继续。
 
-- **`pc/`** — Windows 电脑 + ADB 的 Python 引擎（主力方案，2026-10 起每日实跑）。手机用数据线连着电脑，计划任务自动完成两个账号各 21 条激励广告（9×20min + 3×30min + 9×10min = 各 +6 小时可暂停时长/天）。
-- **`android/`** — 手机本机 App（Kotlin + Shizuku，v0.8.0）。Shizuku 授权后在手机上独立完成同样的任务，是 PC 方案的离线移植，含完整设计文档（`android/SPEC.md`）。
+## 手机端 0.12.0
 
-实测主机型：**荣耀 WIN（型号 AAP-AN00，MagicOS）**，另在 vivo iQOO Z5x（OriginOS）上验证过设备抽象层。荣耀「应用分身」对应独立 Android 用户（主号 user 0、分身 user 128），双账号串行执行。
+打开「领取」，先选运行位置和领取方式，再点「开始 / 继续」。要结束本次任务，点「暂停」。
 
-## 目录结构
+| 运行位置 | 领取方式 | 行为 |
+| --- | --- | --- |
+| 后台或主屏 | 双号 | 主号和应用分身串行轮换 |
+| 后台或主屏 | 全部账号 | 扫描系统允许核对、已安装并启用外星仔的 Android 空间。各账号领满后结束 |
+| 后台或主屏 | 持续观看 | 按全部账号的范围领取。领满后释放虚拟屏、恢复商店，等待额度重新开放 |
+| 主屏 | 仅主号 | 使用无障碍服务，支持只跑一条 |
 
+不可访问或不可用的空间会在界面提示。主屏模式需要目标页面留在前台，切出时会暂停。后台模式在单个虚拟屏轮换账号，领取页可看状态和进度。广告声音可能影响主屏媒体。保持手机解锁运行。
+
+### 设置和记录
+
+- 「允许使用移动数据」默认关闭。此时要求当前默认网络是可联网的 Wi-Fi。打开后也允许可联网的移动数据。运行中网络不满足条件会暂停，恢复网络后可点「开始 / 继续」。
+- 「定时领取」默认关闭。打开后选择手机当地时间，每天到点尝试「后台 → 全部账号」。若锁屏、网络不符合设置、助手未连接或任务忙，会稍后再试。实际触发时间受 Android 闹钟权限及系统调度影响。手动选项独立保存。
+- 「记录」显示开始和结束时间、该轮耗时、已确认新增条数和结束原因。支持逐条「删除」和「清空」。后台记录需要助手连接。删除记录只影响本机列表。
+
+## 安装与启动
+
+1. 从项目 Release 获取同版本 APK 和后台助手恢复包，也可按下文构建。覆盖安装要求签名一致。
+2. 「主屏 → 仅主号」需要在「设置 → 无障碍设置」启用「外星仔一键领时长」。该入口检测到已知应用市场或安装器窗口后会暂停。有广告安装防护要求时，请使用带系统检查及商店保护的双号或全部账号模式。
+3. 双号、全部账号、持续观看及定时领取需要后台助手。手机解锁并打开领取助手，通过已授权的 USB 或无线 ADB 连接 Windows 电脑。
+4. 完整解压恢复包，双击「启动后台助手.bat」。就绪后可以断开电脑。首次使用、手机重启或助手长时间未连接时，按本步骤启动。更新旧助手前，先暂停任务并等待收尾，再双击启动脚本。
+
+新版使用本机 ADB 助手和无障碍，日常领取无需 Shizuku。助手仅监听本机回环接口，任务指令经双向认证。启动脚本会检查机型和 APK 版本。
+
+在双号、全部账号和持续观看模式中，程序会在首条广告前启用当轮商店保护，结束后恢复已识别商店的原状态。荣耀桌面重新显示商店图标时可能改变位置。仅核对额度及持续模式的等待期间不启用商店保护。
+
+开始后台任务时，如果系统已有活跃的应用安装会话，程序会等待更新结束。等待期间可随时暂停。
+
+## 在 Windows 构建
+
+需要 JDK 17、Gradle 8.9、Android SDK Platform 35、Build-Tools 35.0.0 和 Platform-Tools。将 Gradle、JDK 和 `adb` 加入 PATH，并将 `ANDROID_HOME` 设为 SDK 目录。在仓库根目录运行以下命令。
+
+```powershell
+gradle -p mobile/android :app:assembleDebug :app:lintDebug
+if ($LASTEXITCODE -ne 0) { throw 'APK 构建或 lint 失败' }
+
+$sdk = $env:ANDROID_HOME
+$androidJar = Join-Path $sdk 'platforms/android-35/android.jar'
+$d8 = Join-Path $sdk 'build-tools/35.0.0/d8.bat'
+$classesDir = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $classesDir | Out-Null
+$sources = Get-ChildItem mobile/phonehelper -Filter '*.java' -File
+javac --release 8 -encoding UTF-8 -cp $androidJar -d $classesDir $sources.FullName
+if ($LASTEXITCODE -ne 0) { throw '后台助手编译失败' }
+$classes = Get-ChildItem $classesDir -Filter '*.class' -File
+& $d8 --min-api 34 --lib $androidJar --output mobile/recover/dual-helper.jar $classes.FullName
+if ($LASTEXITCODE -ne 0) { throw '后台助手 DEX 构建失败' }
+Copy-Item mobile/phonehelper/market_lease.sh,mobile/phonehelper/supervise.sh mobile/recover/
 ```
-pc/
-  watch_ads_v3.py          # 引擎本体（Python 标准库，无第三方依赖）
-  watch_ads_launcher.bat   # Windows 每日调度入口（参数化模板）
-  run_force_uiauto.bat.example  # 强制 uiautomator 后端的模板
-  vivo_cli.py              # mobilecli 后端适配（仅 vivo/OriginOS 需要）
-  test_v3_mock.py          # 离线 mock 测试
-  EXPERIENCE.md            # 两周真机实战经验全集（SDK 形态/信号/击杀窗口/坑）
-android/
-  app/                     # claimer v0.8.0，Kotlin + Shizuku，无 INTERNET 权限
-  SPEC.md                  # 手机版完整设计规格（安全不变式/状态机/接口）
-  README.md                # 手机版构建与使用说明
-  deploy.sh.example        # 构建+安装+自检脚本模板
-```
 
-## 快速开始（PC 方案）
+APK 在 `mobile/android/app/build/outputs/apk/debug/app-debug.apk`。后台助手的 JAR、商店保护脚本和守护脚本与 `mobile/recover/` 下的启动脚本一起使用。恢复脚本通过 Android 的 `run-as` 初始化本机认证，因此使用可调试构建。
 
-1. 安装 Android platform-tools，确保 `adb` 在 PATH；手机开启「USB 调试」，USB 模式选「传输文件(MTP)」。
-2. `adb devices` 确认能枚举到设备。荣耀 WIN 上若枚举为空，尝试 `adb kill-server` 后用 `set ADB_LIBUSB=1 && adb start-server`（两种 USB 后端随机生效，见 `pc/EXPERIENCE.md`）。
-3. 先零消耗探活：
-   ```
-   py watch_ads_v3.py --serial <序列号> --selftest
-   ```
-4. 单账号试跑一轮确认链路：
-   ```
-   py watch_ads_v3.py --serial <序列号> --user 0
-   ```
-5. 编辑 `watch_ads_launcher.bat` 填入序列号，用 Windows 任务计划程序挂「每天 08:00 主跑 + 每 30 分钟兜底」。有完成标记或设备离线时会秒退。
+## 兼容性
 
-详细机制、广告 SDK 形态、奖励安全不变式与故障处置见 **[pc/EXPERIENCE.md](pc/EXPERIENCE.md)** 与 [pc/README.md](pc/README.md)。
+**荣耀 WIN Y（AAP-AN00，Android 17）**为手机端实测基线。其他 ROM 仍需验证分身、虚拟显示、窗口读取和商店保护。设计、实测与限制见 [手机端经验与验证记录](mobile/NOTES.md)。
 
-## 快速开始（手机方案）
-
-见 [android/README.md](android/README.md)。需要 Shizuku 运行并授权；支持设定每日启动时间、双账号串行，无电脑值守。
-
-## 设计原则（两套实现共同遵守）
-
-1. **只做正常 UI 操作**：点击 CTA、等待、返回、`am force-stop` 重开。不调用目标 App 私有 API、不改包、不伪造奖励回调、不用 root；手机版不申请 INTERNET 权限。
-2. **奖励安全线不可压缩**：实测发奖点在 CTA 点击后约 18–20s（视频中段），绝不在发奖前退出广告；发奖后 force-stop + 冷启动，以服务端阶段计数与时长增量白名单（600/1200/1800s）验收。
-3. **权威信号是焦点组件名**（`dumpsys window` 的 mCurrentFocus），不是屏幕文本——激励视频 Surface 没有可靠文本。
-
-## 风险提示
-
-自动化播放激励广告可能违反外星仔加速器的用户协议，存在封号、追回时长等风险。本项目仅供个人设备上的学习与研究使用，请自行评估后果；不要用于出售代领、批量账号或任何营利场景。
+仓库还保留 [电脑端 ADB/Python](pc/README.md) 和 [旧版 Android/Shizuku](android/README.md)。
 
 ## 许可
 

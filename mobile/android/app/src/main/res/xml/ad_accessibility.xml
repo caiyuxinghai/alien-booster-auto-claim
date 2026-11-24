@@ -1,0 +1,10 @@
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:packageNames="com.etalien.booster,com.android.settings,com.hihonor.systemmanager,com.hihonor.android.internal.app,com.hihonor.appmarket,com.huawei.appmarket,com.android.vending,com.android.packageinstaller,com.google.android.packageinstaller,com.hihonor.android.packageinstaller,com.huawei.android.packageinstaller"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:notificationTimeout="200"
+    android:canRetrieveWindowContent="true"
+    android:canPerformGestures="true"
+    android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows|flagIncludeNotImportantViews"
+    android:description="@string/accessibility_description"
+    android:settingsActivity="com.alienbooster.claimer.MainActivity"/>

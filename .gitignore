@@ -25,3 +25,8 @@ pc/mobilecli*.dex
 # local copies made from *.example templates
 deploy.sh
 run_force_uiauto.bat
+
+mobile/android/.kotlin/
+mobile/recover/dual-helper.jar
+mobile/recover/market_lease.sh
+mobile/recover/supervise.sh

@@ -1,0 +1,2 @@
+mobile/phonehelper/*.sh text eol=lf
+mobile/recover/*.bat text eol=crlf
