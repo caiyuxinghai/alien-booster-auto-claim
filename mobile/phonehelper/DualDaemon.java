@@ -612,11 +612,11 @@ public final class DualDaemon {
 
     private static final class Lease {
         private final String base = new File(DIRECTORY, "session-" + UUID.randomUUID()).getPath();
-        private final long start = SystemClock.elapsedRealtime();
         private final Set<String> initial = new HashSet<>();
         private final Set<String> stores = new HashSet<>();
         private final List<Integer> profiles;
         private boolean started;
+        private long runDeadline;
         private long lastCheck;
         private long lastNetworkCheck;
 
@@ -639,6 +639,7 @@ public final class DualDaemon {
             }
             update("RUNNING", withProgress(selection, "正在核对直接安装权限"));
             verifyInstallPermissions();
+            runDeadline = SystemClock.elapsedRealtime() + RUN_LIMIT_MS;
         }
 
         void start() throws Exception {
@@ -672,7 +673,7 @@ public final class DualDaemon {
             checkStop();
             checkNetwork(immediately);
             long now = SystemClock.elapsedRealtime();
-            if (now - start > RUN_LIMIT_MS) throw new CycleLimit();
+            if (now >= runDeadline) throw new CycleLimit();
             if (!immediately && now - lastCheck < 8_000) return;
             verifyProtection(now);
         }
