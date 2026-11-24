@@ -94,6 +94,7 @@ restore_journal() (
   [ "$seen" != " " ] || exit 1
 
   errors=0
+  changed=0
   while IFS=' ' read -r app original; do
     current=$(package_state "$app") || { errors=1; continue; }
     [ "$current" != "$original" ] || continue
@@ -101,25 +102,49 @@ restore_journal() (
     [ "$current" = 3 ] || { errors=1; continue; }
     case "$original" in 0) action=default-state ;; 1) action=enable ;; esac
     timeout 10 pm "$action" --user 0 "$app" >/dev/null 2>&1 || { errors=1; continue; }
-    [ "$(package_state "$app")" = "$original" ] || errors=1
+    if [ "$(package_state "$app")" = "$original" ]; then changed=1; else errors=1; fi
   done < "$file"
   [ "$errors" = 0 ] || exit 1
   touch "$session.market-restored" &&
     rm -f "$file" &&
-    toybox fsync "$ROOT"
+    toybox fsync "$ROOT" &&
+    printf '%s\n' "$changed"
 )
 
 recover_old() {
+  recovery_status=NO_PENDING
   for old in "$ROOT"/session-*.market-journal; do
-    [ -f "$old" ] || continue
+    [ -e "$old" ] || [ -L "$old" ] || continue
+    [ -f "$old" ] && [ ! -L "$old" ] || return 1
     old_base=${old%.market-journal}
     valid_base "$old_base" || return 1
-    rm -f "$old_base.market-ready" || return 1
-    if ! restore_journal "$old"; then
+    if [ -e "$old_base.market-ready" ] || [ -L "$old_base.market-ready" ]; then
+      [ -f "$old_base.market-ready" ] && [ ! -L "$old_base.market-ready" ] || return 1
+      rm -f "$old_base.market-ready" || return 1
+    fi
+    if ! changed=$(restore_journal "$old"); then
       printf '%s\n' '旧市场保护的原始状态未完全恢复，请先检查商店设置。' > "$old_base.market-error"
       return 1
     fi
+    if [ "$changed" = 1 ]; then recovery_status=RESTORED; fi
   done
+  clear_orphan_markers || return 1
+  printf '%s\n' "$recovery_status"
+}
+
+# The market lock is held. Package changes only follow a committed journal.
+clear_orphan_markers() {
+  set --
+  for marker in "$ROOT"/session-*.market-ready "$ROOT"/session-*.market-journal.tmp; do
+    [ -e "$marker" ] || [ -L "$marker" ] || continue
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+    marker_base=${marker%.market-ready}
+    marker_base=${marker_base%.market-journal.tmp}
+    valid_base "$marker_base" || return 1
+    [ ! -e "$marker_base.market-journal" ] && [ ! -L "$marker_base.market-journal" ] || return 1
+    set -- "$@" "$marker"
+  done
+  [ "$#" = 0 ] || { rm -f "$@" && toybox fsync "$ROOT"; }
 }
 
 finish() {
@@ -127,7 +152,7 @@ finish() {
   trap - EXIT
   rm -f "$BASE.market-ready" "$BASE.market-journal.tmp"
   if [ -f "$BASE.market-journal" ]; then
-    if ! restore_journal "$BASE.market-journal"; then
+    if ! restore_journal "$BASE.market-journal" >/dev/null; then
       write_error '市场保护已结束，但有商店未确认恢复；已保留恢复记录。'
       exit 1
     fi
@@ -163,10 +188,13 @@ if ! toybox flock -n 0 <&9; then
   exit 75
 fi
 trap '' HUP
-if ! recover_old; then
+if ! recovered=$(recover_old); then
   fail '有尚未恢复的旧市场保护，暂不能开始。'
 fi
-[ -n "$BASE" ] || exit 0
+if [ -z "$BASE" ]; then
+  printf 'MARKET_RECOVERY %s\n' "$recovered"
+  exit 0
+fi
 [ -f "$BASE.lease" ] && [ ! -f "$BASE.market-stop" ] || fail '任务未续约或已停止。'
 [ ! -e "$BASE.market-ready" ] && [ ! -e "$BASE.market-restored" ] ||
   fail '这个市场会话已使用，请重新开始。'

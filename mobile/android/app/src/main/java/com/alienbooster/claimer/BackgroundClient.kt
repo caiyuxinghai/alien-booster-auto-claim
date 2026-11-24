@@ -60,7 +60,11 @@ internal class BackgroundClient(context: Context) {
 
     sealed class Result {
         data class Ready(val status: Status) : Result()
-        data class Failed(val message: String, val commandMayHaveRun: Boolean = false) : Result()
+        data class Failed(
+            val message: String,
+            val commandMayHaveRun: Boolean = false,
+            val offline: Boolean = false
+        ) : Result()
     }
 
     private val tokenFile = AtomicFile(File(context.applicationContext.filesDir, "dual.token"))
@@ -79,7 +83,7 @@ internal class BackgroundClient(context: Context) {
             val result = try {
                 parse(exchange(command, false))
             } catch (error: TransportError) {
-                Result.Failed(error.message ?: "后台助手连接失败", error.maybeSent)
+                Result.Failed(error.message ?: "后台助手连接失败", error.maybeSent, error.offline)
             } catch (_: IOException) {
                 Result.Failed("后台助手回复格式无效，正在核对状态", command != "STATUS")
             }
@@ -97,7 +101,11 @@ internal class BackgroundClient(context: Context) {
         return reply.substring(5)
     }
 
-    private class TransportError(message: String, val maybeSent: Boolean = false) : IOException(message)
+    private class TransportError(
+        message: String,
+        val maybeSent: Boolean = false,
+        val offline: Boolean = false
+    ) : IOException(message)
 
     private fun exchange(command: String, history: Boolean): String {
         val token = try {
@@ -139,7 +147,7 @@ internal class BackgroundClient(context: Context) {
         } catch (error: TransportError) {
             throw error
         } catch (_: ConnectException) {
-            throw TransportError("后台助手未连接。首次使用或重启手机后，需要启动后台助手", sent)
+            throw TransportError("后台助手未连接。主屏和后台都需要助手，请用恢复包接入", sent, offline = true)
         } catch (_: SocketTimeoutException) {
             throw TransportError("后台助手响应超时，正在重新确认状态", sent)
         } catch (_: IOException) {
@@ -236,7 +244,7 @@ internal class BackgroundClient(context: Context) {
         val owner = fields[2].toIntOrNull()?.takeIf { it in -1..21 } ?: throw IOException("Invalid owner progress")
         val clone = fields[3].toIntOrNull()?.takeIf { it in -1..21 } ?: throw IOException("Invalid clone progress")
         if (!fields[4].startsWith(STATUS_PROTOCOL)) {
-            return Result.Failed("后台助手需要更新，请运行 0.12.2 恢复包")
+            return Result.Failed("后台助手需要更新，请运行 0.12.3 恢复包")
         }
         val payload = fields[4].removePrefix(STATUS_PROTOCOL)
         val instanceId = payload.substringBefore(' ', "")
@@ -250,7 +258,7 @@ internal class BackgroundClient(context: Context) {
 
     companion object {
         private const val PORT = 34783
-        private const val STATUS_PROTOCOL = "[0.12.2] "
+        private const val STATUS_PROTOCOL = "[0.12.3] "
         private const val HEX = "0123456789abcdef"
         private val random = SecureRandom()
         private val tokenLock = Any()

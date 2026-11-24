@@ -108,8 +108,8 @@ try {
     $model = (Invoke-DeviceAdb @('shell','getprop','ro.product.model') | Out-String).Trim()
     if ($model -notmatch '^AAP[-_]AN00$') { throw ('连接设备型号为 ' + $model + '。这个恢复包只用于荣耀 WIN Y。') }
     $package = Invoke-DeviceAdb @('shell','dumpsys','package',$pkg)
-    if (-not ($package | Where-Object { $_ -match '^\s*versionName=0\.12\.2\s*$' })) {
-        throw '手机需要先安装「外星仔领时长」0.12.2。'
+    if (-not ($package | Where-Object { $_ -match '^\s*versionName=0\.12\.3\s*$' })) {
+        throw '手机需要先安装「外星仔领时长」0.12.3。'
     }
     foreach ($name in @('dual-helper.jar','market_lease.sh','supervise.sh')) {
         if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $name) -PathType Leaf)) {

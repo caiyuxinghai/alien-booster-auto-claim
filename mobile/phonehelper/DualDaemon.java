@@ -50,7 +50,7 @@ public final class DualDaemon {
     private static final int PORT = 34783;
     // The supervisor distinguishes an acknowledged restart from a crash.
     private static final int RESTART_EXIT = 75;
-    private static final String STATUS_PROTOCOL = "[0.12.2] ";
+    private static final String STATUS_PROTOCOL = "[0.12.3] ";
     private static final String TARGET = "com.etalien.booster";
     private static final String[] STORES = {"com.hihonor.appmarket", "com.android.vending", "com.hihonor.gamecenter"};
     private static final Pattern INSTALL_PRIVILEGE = Pattern.compile(
@@ -298,9 +298,17 @@ public final class DualDaemon {
         update("RECOVERING", "正在按记录恢复商店图标");
         worker = new Thread(() -> {
             try {
-                shell(45, "/system/bin/sh", MARKET, "--recover");
+                String report = shell(45, "/system/bin/sh", MARKET, "--recover").trim();
+                String message;
+                if ("MARKET_RECOVERY RESTORED".equals(report)) {
+                    message = "已恢复保护期间停用的商店显示";
+                } else if ("MARKET_RECOVERY NO_PENDING".equals(report)) {
+                    message = "当前没有待恢复的商店";
+                } else {
+                    throw new IOException("无法核对商店恢复结果");
+                }
                 cleanupFailed = false;
-                update("RECOVERED", "商店恢复检查完成");
+                update("RECOVERED", message);
             } catch (IOException | RuntimeException error) {
                 cleanupFailed = true;
                 update("RECOVERY_FAILED", "商店恢复未确认，请稍后重试");

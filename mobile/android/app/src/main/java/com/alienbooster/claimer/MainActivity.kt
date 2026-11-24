@@ -240,7 +240,7 @@ class MainActivity : Activity() {
             setOnClickListener { restoreStoreIcons() }
         }
         maintenance.addView(restoreIcons, row(height = 48, top = 6))
-        maintenance.addView(label("按保护记录恢复商店显示，图标位置由荣耀桌面安排。", 13, muted), row(top = 8))
+        maintenance.addView(label("按保护记录恢复商店显示。图标位置由荣耀桌面安排，移位后可长按拖回。", 13, muted), row(top = 8))
         restoreStatus = label("", 13, muted)
         maintenance.addView(restoreStatus, row(top = 8))
         restartAssistant = button("重启助手", inactive, ink).apply {
@@ -547,7 +547,15 @@ class MainActivity : Activity() {
                 if (previous && !maybeActive && tab == Tab.HISTORY) loadHistory()
                 helperError = null
             }
-            is BackgroundClient.Result.Failed -> helperError = result.message
+            is BackgroundClient.Result.Failed -> {
+                helperError = result.message
+                if (result.offline) {
+                    snapshot = null
+                    maybeActive = false
+                    feedback = null
+                    lastAppliedPolicy = null
+                }
+            }
         }
         verifyRestart(result)
         render()
