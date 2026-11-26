@@ -26,6 +26,8 @@ internal class BackgroundClient(context: Context) {
     enum class Command(val mode: Mode? = null) {
         STATUS,
         START(Mode.BACKGROUND),
+        START_BACKGROUND_SOLO(Mode.BACKGROUND_SOLO),
+        START_BACKGROUND_SOLO_TRIAL(Mode.BACKGROUND_SOLO),
         START_FOREGROUND(Mode.FOREGROUND),
         START_FOREGROUND_SOLO(Mode.FOREGROUND_SOLO),
         START_FOREGROUND_SOLO_TRIAL(Mode.FOREGROUND_SOLO),
@@ -41,6 +43,7 @@ internal class BackgroundClient(context: Context) {
     enum class State { IDLE, RUNNING, WAITING, STOPPED, DONE, ERROR, RECOVERING, RECOVERED, RECOVERY_FAILED, RESTARTING }
     enum class Mode(val prefix: String, val label: String, val foreground: Boolean) {
         BACKGROUND("", "后台领双号", false),
+        BACKGROUND_SOLO("[后台仅主号] ", "后台仅主号", false),
         FOREGROUND("[主屏双号] ", "主屏双号", true),
         FOREGROUND_SOLO("[主屏仅主号] ", "主屏仅主号", true),
         ALL_BACKGROUND("[后台全部] ", "后台全部账号", false),
@@ -63,7 +66,8 @@ internal class BackgroundClient(context: Context) {
         data class Failed(
             val message: String,
             val commandMayHaveRun: Boolean = false,
-            val offline: Boolean = false
+            val offline: Boolean = false,
+            val needsUpgrade: Boolean = false
         ) : Result()
     }
 
@@ -78,17 +82,21 @@ internal class BackgroundClient(context: Context) {
         enqueue(if (allowed) "NET_ALLOW_MOBILE" else "NET_WIFI_ONLY", onResult)
     }
 
+    fun statusBlocking(): Result = exchangeStatus("STATUS")
+
     private fun enqueue(command: String, onResult: (Result) -> Unit) {
         executor.execute {
-            val result = try {
-                parse(exchange(command, false))
-            } catch (error: TransportError) {
-                Result.Failed(error.message ?: "后台助手连接失败", error.maybeSent, error.offline)
-            } catch (_: IOException) {
-                Result.Failed("后台助手回复格式无效，正在核对状态", command != "STATUS")
-            }
+            val result = exchangeStatus(command)
             mainHandler.post { onResult(result) }
         }
+    }
+
+    private fun exchangeStatus(command: String): Result = try {
+        parse(exchange(command, false))
+    } catch (error: TransportError) {
+        Result.Failed(error.message ?: "后台助手连接失败", error.maybeSent, error.offline)
+    } catch (_: IOException) {
+        Result.Failed("后台助手回复格式无效，正在核对状态", command != "STATUS")
     }
 
     fun historyRpcBlocking(command: String): String {
@@ -147,7 +155,7 @@ internal class BackgroundClient(context: Context) {
         } catch (error: TransportError) {
             throw error
         } catch (_: ConnectException) {
-            throw TransportError("后台助手未连接。主屏和后台都需要助手，请用恢复包接入", sent, offline = true)
+            throw TransportError("完整助手未连接，可在设置中配对并启动助手", sent, offline = true)
         } catch (_: SocketTimeoutException) {
             throw TransportError("后台助手响应超时，正在重新确认状态", sent)
         } catch (_: IOException) {
@@ -244,7 +252,7 @@ internal class BackgroundClient(context: Context) {
         val owner = fields[2].toIntOrNull()?.takeIf { it in -1..21 } ?: throw IOException("Invalid owner progress")
         val clone = fields[3].toIntOrNull()?.takeIf { it in -1..21 } ?: throw IOException("Invalid clone progress")
         if (!fields[4].startsWith(STATUS_PROTOCOL)) {
-            return Result.Failed("后台助手需要更新，请运行 0.12.3 恢复包")
+            return Result.Failed("助手版本需要更新，请在设置中重新接入或使用 0.14.1 恢复包", needsUpgrade = true)
         }
         val payload = fields[4].removePrefix(STATUS_PROTOCOL)
         val instanceId = payload.substringBefore(' ', "")
@@ -258,7 +266,7 @@ internal class BackgroundClient(context: Context) {
 
     companion object {
         private const val PORT = 34783
-        private const val STATUS_PROTOCOL = "[0.12.3] "
+        private const val STATUS_PROTOCOL = "[0.14.1] "
         private const val HEX = "0123456789abcdef"
         private val random = SecureRandom()
         private val tokenLock = Any()

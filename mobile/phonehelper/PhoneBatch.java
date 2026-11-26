@@ -136,8 +136,8 @@ final class PhoneBatch {
         runProfiles(displayId, control, profiles, rotate, foregroundContinuation, false);
     }
 
-    static boolean tryOneOwnerAd(Control control) throws Exception {
-        return runProfiles(0, control, Collections.singletonList(0), 0, false, true);
+    static boolean tryOneOwnerAd(int displayId, Control control) throws Exception {
+        return runProfiles(displayId, control, Collections.singletonList(0), 0, false, true);
     }
 
     private static boolean runProfiles(int displayId, Control control, List<Integer> profiles, int rotate,

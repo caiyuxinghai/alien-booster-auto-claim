@@ -59,8 +59,11 @@ internal object RunHistory {
     fun clear(context: Context) {
         val app = context.applicationContext
         checkAccepted(BackgroundClient(app).historyRpcBlocking("CLEAR_HISTORY"))
-        synchronized(lock) { writeLocal(app, emptyList()) }
+        clearLocal(app)
     }
+
+    @Throws(IOException::class)
+    fun clearLocal(context: Context) = synchronized(lock) { writeLocal(context, emptyList()) }
 
     @Throws(IOException::class)
     fun recordLocal(
@@ -159,6 +162,8 @@ internal object RunHistory {
             val mode = if (local) rawMode else when (rawMode) {
                 "BACKGROUND" -> "后台双号"
                 "FOREGROUND" -> "主屏双号"
+                "BACKGROUND_SOLO" -> "后台仅主号"
+                "BACKGROUND_SOLO_TRIAL" -> "后台主号试跑"
                 "FOREGROUND_SOLO" -> "主屏仅主号"
                 "FOREGROUND_SOLO_TRIAL", "FOREGROUND_SOLO_TRIA" -> "主屏主号试跑"
                 "ALL_BACKGROUND" -> "后台全部账号"

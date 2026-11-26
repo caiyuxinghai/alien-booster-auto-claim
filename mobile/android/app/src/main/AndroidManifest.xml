@@ -23,6 +23,9 @@
                 <action android:name="android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED"/>
             </intent-filter>
         </receiver>
+        <receiver android:name=".PhonePairingReplyReceiver" android:exported="false"/>
+        <service android:name=".ScheduledHelperStartup" android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE"/>
         <service android:name=".AdAccessibilityService" android:label="外星仔一键领时长" android:exported="true" android:foregroundServiceType="specialUse" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="User started on-device automation of rewarded video UI"/>
             <intent-filter><action android:name="android.accessibilityservice.AccessibilityService"/></intent-filter>

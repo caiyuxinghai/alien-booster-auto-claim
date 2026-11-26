@@ -3,23 +3,33 @@ package com.alienbooster.claimer
 import android.app.AlarmManager
 import android.app.KeyguardManager
 import android.app.PendingIntent
+import android.app.job.JobInfo
+import android.app.job.JobParameters
+import android.app.job.JobScheduler
+import android.app.job.JobService
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.max
 
-/** Daily background run in the device's local timezone. There is one pending alarm. */
+/** One daily alarm using the selected mode and the device's local timezone. */
 internal object RunSchedule {
     internal const val ACTION = "com.alienbooster.claimer.DAILY_ALARM"
     private const val RETRY_MS = 15 * 60_000L
-    private val pendingDispatch = AtomicBoolean(false)
+    private enum class Dispatch { MANUAL, SCHEDULED }
+    private val pendingDispatch = AtomicReference<Dispatch?>(null)
+    fun tryManualDispatch() = pendingDispatch.compareAndSet(null, Dispatch.MANUAL)
+    fun finishManualDispatch() { pendingDispatch.compareAndSet(Dispatch.MANUAL, null) }
+    fun dispatchInFlight() = pendingDispatch.get() != null
     private fun prefs(c: Context) = c.getSharedPreferences("daily_dispatch", Context.MODE_PRIVATE)
     private fun operation(c: Context) = PendingIntent.getBroadcast(c, 40,
         Intent(c, ScheduleReceiver::class.java).setAction(ACTION),
@@ -91,22 +101,36 @@ internal object RunSchedule {
         prefs(c).edit().putStringSet("sent_days", dates).commit()
     }
 
-    private fun blocker(c: Context): String? = when {
+    private fun blocker(c: Context, local: Boolean): String? = when {
         !RunPrefs.networkAllowed(c) -> if (RunPrefs.allowMobile(c)) "定时领取正在等待网络" else "定时领取正在等待 Wi-Fi"
         c.getSystemService(KeyguardManager::class.java)?.isKeyguardLocked != false -> "手机已锁定，定时领取稍后再试"
         AdAccessibilityService.instance?.isActiveRun == true -> "主屏单号正在运行，定时领取稍后再试"
+        local && AdAccessibilityService.instance == null -> "定时领取正在等待无障碍权限"
+        local && c.getSystemService(PowerManager::class.java)?.isInteractive != true -> "手机已熄屏，定时领取稍后再试"
+        local && AdAccessibilityService.instance?.canStartFromDashboardOrLauncher() != true ->
+            "等待回到桌面或领取页后定时领取"
         else -> null
     }
 
-    fun fire(c: Context, done: () -> Unit) {
+    fun canStartHelper(c: Context): Boolean =
+        RunPrefs.scheduleEnabled(c) && !RunPrefs.useAccessibility(c) && RunPrefs.autoStartHelper(c) &&
+            PhoneHelperBootstrap.isPaired(c) && due(c, System.currentTimeMillis()) <= System.currentTimeMillis() &&
+            blocker(c, false) == null
+
+    fun fire(c: Context, allowHelperStartup: Boolean = true, done: () -> Unit) {
         val now = System.currentTimeMillis()
         if (!RunPrefs.scheduleEnabled(c) || due(c, now) > now) {
             refresh(c)
             done()
             return
         }
-        if (!pendingDispatch.compareAndSet(false, true)) { done(); return }
+        if (!pendingDispatch.compareAndSet(null, Dispatch.SCHEDULED)) {
+            defer(c, "任务正在启动，定时领取稍后再试")
+            done()
+            return
+        }
         val config = RunPrefs.effectiveFrom(c)
+        val local = RunPrefs.useAccessibility(c)
         val day = dayAt(now, ZoneId.systemDefault())
         val handler = Handler(Looper.getMainLooper())
         var finished = false
@@ -116,20 +140,26 @@ internal object RunSchedule {
             if (finished) return
             finished = true
             timeout?.let(handler::removeCallbacks)
-            pendingDispatch.set(false)
+            pendingDispatch.compareAndSet(Dispatch.SCHEDULED, null)
             done()
         }
         fun unchanged(): Boolean = RunPrefs.scheduleEnabled(c) && config == RunPrefs.effectiveFrom(c) &&
+            local == RunPrefs.useAccessibility(c) &&
             day == dayAt(System.currentTimeMillis(), ZoneId.systemDefault())
         fun retry(message: String) {
             if (unchanged()) defer(c, message) else refresh(c)
             finish()
         }
+        fun started(message: String) {
+            prefs(c).edit().remove("retry_at").putString("last_message", message).apply()
+            refresh(c)
+            finish()
+        }
         try {
-            val blocked = blocker(c)
+            val blocked = blocker(c, local)
             if (blocked != null) { retry(blocked); return }
             // Ensure the next opportunity survives loss of this receiver's process.
-            defer(c, "正在连接后台助手")
+            defer(c, "正在核对定时领取条件")
             timeout = Runnable {
                 if (!reserved) retry("后台助手响应超时，定时领取稍后再试")
                 else {
@@ -139,21 +169,51 @@ internal object RunSchedule {
                 }
             }.also { handler.postDelayed(it, 8000) }
             val client = BackgroundClient(c)
-            client.applyNetworkPolicy(RunPrefs.allowMobile(c)) network@{ policy ->
-                if (finished) return@network
-                if (!unchanged()) { refresh(c); finish(); return@network }
-                if (policy !is BackgroundClient.Result.Ready) { retry("后台助手未就绪，定时领取稍后再试"); return@network }
-                val latestBlock = blocker(c)
-                if (latestBlock != null) { retry(latestBlock); return@network }
-                if (!reserveDay(c, day)) { refresh(c); finish(); return@network }
+            val afterCheck: (BackgroundClient.Result) -> Unit = checked@{ result ->
+                if (finished) return@checked
+                if (!unchanged()) { refresh(c); finish(); return@checked }
+                if (result is BackgroundClient.Result.Failed && !(local && result.offline)) {
+                    if (allowHelperStartup && (result.offline || result.needsUpgrade) && canStartHelper(c)) {
+                        val scheduler = c.getSystemService(JobScheduler::class.java)
+                        val info = JobInfo.Builder(4417, ComponentName(c, ScheduledHelperStartup::class.java))
+                            .setMinimumLatency(500L).build()
+                        if (scheduler?.schedule(info) == JobScheduler.RESULT_SUCCESS) {
+                            retry("正在从手机启动后台助手")
+                            return@checked
+                        }
+                    }
+                    retry("后台助手状态未确认，定时领取稍后再试")
+                    return@checked
+                }
+                if (result is BackgroundClient.Result.Ready && result.status.state in setOf(
+                        BackgroundClient.State.RUNNING, BackgroundClient.State.WAITING,
+                        BackgroundClient.State.RECOVERING, BackgroundClient.State.RESTARTING)) {
+                    retry("助手有任务，定时领取稍后再试")
+                    return@checked
+                }
+                val latestBlock = blocker(c, local)
+                if (latestBlock != null) { retry(latestBlock); return@checked }
+                if (!reserveDay(c, day)) { refresh(c); finish(); return@checked }
                 reserved = true
+                if (local) {
+                    val service = AdAccessibilityService.instance
+                    try {
+                        service?.startRun(21)
+                    } catch (_: RuntimeException) {
+                        service?.pauseRun("无障碍领取启动失败")
+                    }
+                    if (service?.isActiveRun == true) started("今日定时无障碍主号领取已启动")
+                    else {
+                        freeDay(c, day)
+                        retry("无障碍领取未启动，稍后再试")
+                    }
+                    return@checked
+                }
                 client.request(BackgroundClient.Command.SCHEDULE_ALL_BACKGROUND) dispatch@{ result ->
                     if (finished) return@dispatch
                     when (result) {
                         is BackgroundClient.Result.Ready -> {
-                            prefs(c).edit().remove("retry_at").putString("last_message", "今日定时领取已启动").apply()
-                            refresh(c)
-                            finish()
+                            started("今日定时后台领取已启动")
                         }
                         is BackgroundClient.Result.Failed -> {
                             if (!result.commandMayHaveRun) {
@@ -168,6 +228,8 @@ internal object RunSchedule {
                     }
                 }
             }
+            if (local) client.request(BackgroundClient.Command.STATUS, afterCheck)
+            else client.applyNetworkPolicy(RunPrefs.allowMobile(c), afterCheck)
         } catch (_: RuntimeException) {
             retry("定时任务尚未启动，稍后再试")
         }
@@ -186,5 +248,32 @@ class ScheduleReceiver : BroadcastReceiver() {
             Intent.ACTION_TIMEZONE_CHANGED, AlarmManager.ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED ->
                 RunSchedule.refresh(c)
         }
+    }
+}
+
+class ScheduledHelperStartup : JobService() {
+    private var active: JobParameters? = null
+
+    override fun onStartJob(params: JobParameters): Boolean {
+        if (!RunSchedule.canStartHelper(this)) return false
+        active = params
+        PhoneHelperBootstrap.start(this) { result ->
+            if (active !== params) return@start
+            if (result.isSuccess && RunSchedule.canStartHelper(this)) {
+                RunSchedule.fire(this, allowHelperStartup = false) { finish(params) }
+            } else finish(params)
+        }
+        return true
+    }
+
+    override fun onStopJob(params: JobParameters): Boolean {
+        if (active === params) active = null
+        return false
+    }
+
+    private fun finish(params: JobParameters) {
+        if (active !== params) return
+        active = null
+        jobFinished(params, false)
     }
 }

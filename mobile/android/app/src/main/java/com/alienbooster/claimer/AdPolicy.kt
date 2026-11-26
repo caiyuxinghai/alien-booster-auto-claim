@@ -2,6 +2,7 @@ package com.alienbooster.claimer
 
 /** Decisions shared by the accessibility loop and its focused unit tests. */
 object AdPolicy {
+    enum class OutsideAction { WAIT, RETURN, PAUSE }
     private val fraction = Regex("(\\d+)\\s*/\\s*(\\d+)")
     private val countdown = Regex("\\d+\\s*(?:秒|s|S)|(?:跳过|关闭|skip).{0,8}\\d+|\\d+.{0,8}(?:跳过|关闭|skip)", RegexOption.IGNORE_CASE)
     private val reward = Regex("奖励已到账|奖励已发放|已获得奖励|领取成功|已领取奖励|恭喜获得|恭喜完成|任务已完成|reward received|reward granted", RegexOption.IGNORE_CASE)
@@ -40,5 +41,20 @@ object AdPolicy {
         // Plain close buttons may exist before a video has finished. A skip
         // button without a countdown is the SDK's normal enabled exit.
         return reward || compact in setOf("跳过", "跳过广告", "返回领取", "返回领奖", "领取奖励", "Skip", "SKIP")
+    }
+    fun outsideAction(
+        samePackage: Boolean,
+        sinceStartMs: Long,
+        outsideElapsedMs: Long,
+        adJump: Boolean,
+        outsideReturns: Int
+    ): OutsideAction {
+        val grace = when {
+            samePackage && sinceStartMs < 12_000L -> 12_000L
+            adJump -> 8_000L
+            else -> 2_500L
+        }
+        if (outsideElapsedMs <= grace) return OutsideAction.WAIT
+        return if (adJump && outsideReturns < 2) OutsideAction.RETURN else OutsideAction.PAUSE
     }
 }

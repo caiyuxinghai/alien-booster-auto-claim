@@ -40,6 +40,7 @@ class AdAccessibilityService : AccessibilityService() {
     private var lastAction = 0L
     private var returnedAt = 0L
     private var outsideAt = 0L
+    private var outsideReturns = 0
     private var noScreenAt = 0L
     private var missingMainAt = 0L
     private var pending = false
@@ -95,6 +96,13 @@ class AdAccessibilityService : AccessibilityService() {
         super.onDestroy()
     }
 
+    fun canStartFromDashboardOrLauncher(): Boolean {
+        val root = rootInActiveWindow ?: return false
+        val currentPackage = root.packageName?.toString().orEmpty()
+        root.recycle()
+        return currentPackage == packageName || currentPackage in launcherPackages
+    }
+
     /** Re-read actual progress; a saved pending ad is reconciled before another is started. */
     fun startRun(limit: Int = 21) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
@@ -102,6 +110,14 @@ class AdAccessibilityService : AccessibilityService() {
             return
         }
         if (active) return
+        if (!RunPrefs.useAccessibility(this)) {
+            SoloStore.update(this, running = false, status = "请先在领取页选择无障碍主屏")
+            return
+        }
+        if (!canStartFromDashboardOrLauncher()) {
+            SoloStore.update(this, running = false, status = "请回到桌面或领取页再开始，避免打断其他应用")
+            return
+        }
         val km = getSystemService(KEYGUARD_SERVICE) as KeyguardManager
         if (km.isKeyguardLocked) {
             SoloStore.update(this, running = false, status = "请先解锁手机，再点开始 / 继续")
@@ -128,6 +144,7 @@ class AdAccessibilityService : AccessibilityService() {
         lastAction = 0
         returnedAt = 0
         outsideAt = 0
+        outsideReturns = 0
         noScreenAt = 0
         missingMainAt = 0
         stopPhase = StopPhase.NONE
@@ -205,7 +222,7 @@ class AdAccessibilityService : AccessibilityService() {
         try {
             val pkg = root.packageName?.toString().orEmpty()
             if (pkg == "com.hihonor.android.internal.app" &&
-                (now() - startedAt < 15_000 || stopPhase == StopPhase.REOPEN) &&
+                (now() - startedAt < 15_000 || stopPhase == StopPhase.REOPEN || (pending && adSeen)) &&
                 nodes.any { label(it) == "使用以下方式打开" }) {
                 val owner = nodes.firstOrNull { it.viewIdResourceName == "android:id/text1" &&
                     label(it) == targetLabel && !it.contentDescription?.toString().orEmpty().contains("分身") }
@@ -223,8 +240,22 @@ class AdAccessibilityService : AccessibilityService() {
             }
             if (pkg != TARGET) {
                 if (outsideAt == 0L) outsideAt = now()
-                val grace = if (pkg == packageName && now() - startedAt < 12_000) 12_000 else 2500
-                if (now() - outsideAt > grace) pauseRun("已离开外星仔，回到应用后点继续")
+                when (AdPolicy.outsideAction(pkg == packageName, now() - startedAt, now() - outsideAt, pending && adSeen, outsideReturns)) {
+                    AdPolicy.OutsideAction.WAIT -> Unit
+                    AdPolicy.OutsideAction.RETURN -> {
+                        outsideReturns++
+                        outsideAt = now()
+                        status("广告跳到外部应用，正在返回外星仔")
+                        val back = targetIntent()
+                        if (back == null) {
+                            pauseRun("未找到外星仔加速器")
+                        } else {
+                            runCatching { startActivity(back.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                                .onFailure { pauseRun("无法返回外星仔，请手动打开后点继续") }
+                        }
+                    }
+                    AdPolicy.OutsideAction.PAUSE -> pauseRun("已离开外星仔，回到应用后点继续")
+                }
                 return
             }
             outsideAt = 0
@@ -304,6 +335,7 @@ class AdAccessibilityService : AccessibilityService() {
         adOpenedAt = 0
         watchStarted = now()
         returnedAt = 0
+        outsideReturns = 0
         savePending()
         val button = nodes.firstOrNull { it.viewIdResourceName?.endsWith(":id/UIADSubmit") == true } ?: cta
         if (click(button)) {
@@ -531,6 +563,7 @@ class AdAccessibilityService : AccessibilityService() {
         beforeStages = null
         beforeDuration = null
         returnedAt = 0
+        outsideReturns = 0
         prefs.edit().remove("pending").remove("beforeStages").remove("beforeDuration").remove("adSeen").apply()
     }
 
@@ -557,6 +590,12 @@ class AdAccessibilityService : AccessibilityService() {
     }
 
     companion object {
+        private val launcherPackages = setOf(
+            "com.hihonor.android.launcher",
+            "com.android.launcher",
+            "com.android.launcher3",
+            "com.google.android.apps.nexuslauncher"
+        )
         private val installSurfaces = setOf(
             "com.hihonor.appmarket",
             "com.huawei.appmarket",

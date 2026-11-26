@@ -50,7 +50,7 @@ public final class DualDaemon {
     private static final int PORT = 34783;
     // The supervisor distinguishes an acknowledged restart from a crash.
     private static final int RESTART_EXIT = 75;
-    private static final String STATUS_PROTOCOL = "[0.12.3] ";
+    private static final String STATUS_PROTOCOL = "[0.14.1] ";
     private static final String TARGET = "com.etalien.booster";
     private static final String[] STORES = {"com.hihonor.appmarket", "com.android.vending", "com.hihonor.gamecenter"};
     private static final Pattern INSTALL_PRIVILEGE = Pattern.compile(
@@ -87,6 +87,8 @@ public final class DualDaemon {
 
     private enum Mode {
         BACKGROUND("START", "", false, false, false),
+        BACKGROUND_SOLO("START_BACKGROUND_SOLO", "[后台仅主号] ", false, false, false),
+        BACKGROUND_SOLO_TRIAL("START_BACKGROUND_SOLO_TRIAL", "[后台仅主号] ", false, false, false),
         FOREGROUND("START_FOREGROUND", "[主屏双号] ", true, false, false),
         FOREGROUND_SOLO("START_FOREGROUND_SOLO", "[主屏仅主号] ", true, false, false),
         FOREGROUND_SOLO_TRIAL("START_FOREGROUND_SOLO_TRIAL", "[主屏仅主号] ", true, false, false),
@@ -107,6 +109,18 @@ public final class DualDaemon {
             this.foreground = foreground;
             this.all = all;
             this.continuous = continuous;
+        }
+
+        boolean trial() {
+            return this == BACKGROUND_SOLO_TRIAL || this == FOREGROUND_SOLO_TRIAL;
+        }
+
+        boolean ownerOnly() {
+            return this == BACKGROUND_SOLO || this == FOREGROUND_SOLO || trial();
+        }
+
+        List<Integer> fixedProfiles() {
+            return ownerOnly() ? Collections.singletonList(0) : DUAL;
         }
 
         static Mode fromCommand(String command) {
@@ -332,9 +346,7 @@ public final class DualDaemon {
             boolean continuation = false;
             for (;;) {
                 checkStop();
-                Selection selection = requested.all ? discoverProfiles() : new Selection(
-                    requested == Mode.FOREGROUND_SOLO || requested == Mode.FOREGROUND_SOLO_TRIAL
-                        ? Collections.singletonList(0) : DUAL, 0);
+                Selection selection = requested.all ? discoverProfiles() : new Selection(requested.fixedProfiles(), 0);
                 if (selection.profiles.isEmpty()) throw new IOException("当前没有可核对的外星仔账号");
                 boolean complete;
                 String result = "";
@@ -357,7 +369,7 @@ public final class DualDaemon {
                     complete = false;
                 }
                 if (!requested.continuous) {
-                    finalDetail = requested == Mode.FOREGROUND_SOLO_TRIAL ? result :
+                    finalDetail = requested.trial() ? result :
                         selection.profiles.size() + " 个可用账号已领满" + selection.skippedNote();
                     break;
                 }
@@ -426,8 +438,15 @@ public final class DualDaemon {
                     lease.check(true);
                 }
             };
-            if (requested == Mode.FOREGROUND_SOLO_TRIAL) {
-                boolean confirmed = PhoneBatch.tryOneOwnerAd(control);
+            if (requested.trial()) {
+                boolean confirmed;
+                // A trial owns one display and never replays an attempt after an interruption.
+                try (Screen screen = requested.foreground ? null : new Screen()) {
+                    confirmed = PhoneBatch.tryOneOwnerAd(screen == null ? 0 : screen.id(), control);
+                } catch (PhoneBatch.Outside | PhoneBatch.Transient interruption) {
+                    checkStop();
+                    throw new IOException("虚拟屏试跑中断，未确认入账", interruption);
+                }
                 lease.check(true);
                 outcome = confirmed ? "试跑 1 条已确认到账" : "主号今日已满 21/21";
                 return outcome;
@@ -619,7 +638,9 @@ public final class DualDaemon {
                     throw new IOException("重建虚拟屏后连续未推进，请稍后点「开始 / 继续」");
                 }
                 rotate = (rotate + 1) % profiles.size();
-                update("RUNNING", "虚拟屏中断，正在重建并核对另一账号");
+                String retry = profiles.size() > 1 ? "核对另一账号" :
+                    profiles.get(0) == 0 ? "重新核对主号" : "重新核对领取进度";
+                update("RUNNING", "虚拟屏中断，正在重建并" + retry);
                 SystemClock.sleep(900);
             }
         }
